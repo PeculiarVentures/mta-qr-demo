@@ -1,0 +1,36 @@
+# Go
+go/bin/
+go/tmp/
+*.exe
+
+# TypeScript / Node
+ts/node_modules/
+ts/dist/
+ts/*.js
+ts/*.d.ts
+ts/*.js.map
+
+# Build artifacts
+/tmp/mta-go-issuer
+/tmp/mta-go-verifier
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+interop_test_*.log
+# Go coverage
+go/coverage.out
+go/coverage.html
+
+# Python
+__pycache__/
+*.pyc

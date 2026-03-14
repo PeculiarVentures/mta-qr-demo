@@ -1,0 +1,151 @@
+version: "3.9"
+
+# MTA-QR Demo — multi-algorithm service stack
+#
+# Six issuers (3 algorithms × 2 implementations) + 2 verifiers = 8 services.
+#
+# Positive interop matrix (12 cells):
+#   Ed25519   (sig_alg=6): Go :8081, TS :3001 → Go verifier :8082, TS verifier :3002
+#   ECDSA P-256 (sig_alg=4): Go :8083, TS :3003 → Go verifier :8082, TS verifier :3002
+#   ML-DSA-44 (sig_alg=1): Go :8085, TS :3005 → Go verifier :8082, TS verifier :3002
+#
+# For the full automated matrix + negative tests:
+#   python3 interop_test.py
+#
+# MTA_BASE_URL is required so the /trust-config endpoint returns a
+# checkpoint_url that verifier containers can reach (Docker service name,
+# not localhost). Without it the served URL is http://localhost:<port>/checkpoint
+# which resolves to the verifier container, not the issuer.
+#
+# Origin strings include the algorithm suffix per the spec requirement that
+# an origin must uniquely identify a single log instance including its algorithm.
+
+services:
+
+  # ── Go issuers ──────────────────────────────────────────────────────────────
+
+  go-issuer-ed25519:
+    build: { context: ./go, dockerfile: ../docker/go.Dockerfile, target: issuer }
+    ports: ["8081:8081"]
+    environment:
+      - MTA_PORT=8081
+      - MTA_ORIGIN=demo.mta-qr.example/go-issuer/ed25519/v1
+      - MTA_BASE_URL=http://go-issuer-ed25519:8081
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/checkpoint"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [mta-qr]
+
+  go-issuer-ecdsa:
+    build: { context: ./go, dockerfile: ../docker/go.Dockerfile, target: issuer }
+    ports: ["8083:8083"]
+    environment:
+      - MTA_PORT=8083
+      - MTA_SIG_ALG=ecdsa-p256
+      - MTA_ORIGIN=demo.mta-qr.example/go-issuer/ecdsa-p256/v1
+      - MTA_BASE_URL=http://go-issuer-ecdsa:8083
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8083/checkpoint"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [mta-qr]
+
+  go-issuer-mldsa44:
+    build: { context: ./go, dockerfile: ../docker/go.Dockerfile, target: issuer }
+    ports: ["8085:8085"]
+    environment:
+      - MTA_PORT=8085
+      - MTA_SIG_ALG=mldsa44
+      - MTA_ORIGIN=demo.mta-qr.example/go-issuer/mldsa44/v1
+      - MTA_BASE_URL=http://go-issuer-mldsa44:8085
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8085/checkpoint"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [mta-qr]
+
+  # ── TypeScript issuers ───────────────────────────────────────────────────────
+
+  ts-issuer-ed25519:
+    build: { context: ./ts, dockerfile: ../docker/ts.Dockerfile, target: issuer }
+    ports: ["3001:3001"]
+    environment:
+      - MTA_PORT=3001
+      - MTA_ORIGIN=demo.mta-qr.example/ts-issuer/ed25519/v1
+      - MTA_BASE_URL=http://ts-issuer-ed25519:3001
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/checkpoint"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [mta-qr]
+
+  ts-issuer-ecdsa:
+    build: { context: ./ts, dockerfile: ../docker/ts.Dockerfile, target: issuer }
+    ports: ["3003:3003"]
+    environment:
+      - MTA_PORT=3003
+      - MTA_SIG_ALG=ecdsa-p256
+      - MTA_ORIGIN=demo.mta-qr.example/ts-issuer/ecdsa-p256/v1
+      - MTA_BASE_URL=http://ts-issuer-ecdsa:3003
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3003/checkpoint"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [mta-qr]
+
+  ts-issuer-mldsa44:
+    build: { context: ./ts, dockerfile: ../docker/ts.Dockerfile, target: issuer }
+    ports: ["3005:3005"]
+    environment:
+      - MTA_PORT=3005
+      - MTA_SIG_ALG=mldsa44
+      - MTA_ORIGIN=demo.mta-qr.example/ts-issuer/mldsa44/v1
+      - MTA_BASE_URL=http://ts-issuer-mldsa44:3005
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3005/checkpoint"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [mta-qr]
+
+  # ── Verifiers ───────────────────────────────────────────────────────────────
+
+  go-verifier:
+    build: { context: ./go, dockerfile: ../docker/go.Dockerfile, target: verifier }
+    ports: ["8082:8082"]
+    environment:
+      - MTA_PORT=8082
+      - MTA_TRUST_CONFIG_URLS=http://go-issuer-ed25519:8081/trust-config,http://go-issuer-ecdsa:8083/trust-config,http://go-issuer-mldsa44:8085/trust-config,http://ts-issuer-ed25519:3001/trust-config,http://ts-issuer-ecdsa:3003/trust-config,http://ts-issuer-mldsa44:3005/trust-config
+    depends_on:
+      go-issuer-ed25519:   { condition: service_healthy }
+      go-issuer-ecdsa:     { condition: service_healthy }
+      go-issuer-mldsa44:   { condition: service_healthy }
+      ts-issuer-ed25519:   { condition: service_healthy }
+      ts-issuer-ecdsa:     { condition: service_healthy }
+      ts-issuer-mldsa44:   { condition: service_healthy }
+    networks: [mta-qr]
+
+  ts-verifier:
+    build: { context: ./ts, dockerfile: ../docker/ts.Dockerfile, target: verifier }
+    ports: ["3002:3002"]
+    environment:
+      - MTA_PORT=3002
+      - MTA_TRUST_CONFIG_URLS=http://go-issuer-ed25519:8081/trust-config,http://go-issuer-ecdsa:8083/trust-config,http://go-issuer-mldsa44:8085/trust-config,http://ts-issuer-ed25519:3001/trust-config,http://ts-issuer-ecdsa:3003/trust-config,http://ts-issuer-mldsa44:3005/trust-config
+    depends_on:
+      go-issuer-ed25519:   { condition: service_healthy }
+      go-issuer-ecdsa:     { condition: service_healthy }
+      go-issuer-mldsa44:   { condition: service_healthy }
+      ts-issuer-ed25519:   { condition: service_healthy }
+      ts-issuer-ecdsa:     { condition: service_healthy }
+      ts-issuer-mldsa44:   { condition: service_healthy }
+    networks: [mta-qr]
+
+networks:
+  mta-qr:
+    driver: bridge

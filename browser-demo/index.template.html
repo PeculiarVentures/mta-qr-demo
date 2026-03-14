@@ -1,0 +1,2131 @@
+<!DOCTYPE html>
+<!--
+  MTA-QR In-Browser Demo — template
+  ==================================
+  Do NOT serve this file directly. Run build.py to produce index.html.
+
+  Dependencies are injected by build.py from browser-demo/deps/:
+    {{NAYUKI_QR}}   → deps/nayuki_qr.js     (Nayuki QR Code generator v1.8.0, MIT)
+    {{NOBLE_PQ}}    → deps/noble_pq.iife.js  (@noble/post-quantum v0.5.4 ml_dsa44, MIT)
+
+  Everything else runs in-page using Web Crypto (Ed25519, SHA-256).
+  No backend required. No other CDN dependencies.
+
+  Key design note: issuer and verifier share in-page state in this demo because
+  there is no backend. In a real deployment the verifier holds only public keys
+  and cannot re-sign. The cryptographic paths are identical; key separation is not
+  enforced here. Each place this matters is marked with a DEMO NOTE comment.
+
+  Browser requirements: Chrome 113+, Firefox 130+, Safari 17+
+
+  Mode 1 (Cached Checkpoint): two-level tiled tree, proof embedded in QR (offline).
+  Mode 2 (Online Verification): flat tree, tlog-tiles compatible, proof fetched.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MTA-QR · In-Browser Demo</title>
+<style>
+  /* Google Fonts — remove this @import for fully offline use.
+   * DM Sans → system-ui  |  JetBrains Mono → ui-monospace / Consolas */
+  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:ital@0;1&display=swap');
+
+  :root {
+    --navy:           #1B2838;
+    --navy-light:     #243347;
+    --navy-mid:       #2a3f55;
+    --teal:           #2dd4bf;
+    --teal-dark:      #14b8a6;
+    --teal-muted:     rgba(45, 212, 191, 0.12);
+    --slate-50:       #f8fafc;
+    --slate-100:      #f1f5f9;
+    --slate-200:      #e2e8f0;
+    --slate-300:      #cbd5e1;
+    --slate-500:      #64748b;
+    --slate-600:      #475569;
+    --slate-700:      #334155;
+    --slate-900:      #0f172a;
+    --surface:        #ffffff;
+    --color-bg:       var(--slate-100);
+    --color-panel:    var(--surface);
+    --color-border:   var(--slate-200);
+    --color-border2:  var(--slate-300);
+    --color-muted:    var(--slate-500);
+    --color-mid:      var(--slate-700);
+    --color-fg:       var(--slate-900);
+    --color-bright:   #ffffff;
+    --color-accent:   var(--teal);
+    --color-accent2:  var(--teal-dark);
+    --color-warn:     #f59e0b;
+    --color-err:      #ef4444;
+    --color-ok:       #10b981;
+    --font-mono:      'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    --font-sans:      'DM Sans', system-ui, -apple-system, sans-serif;
+    --radius:         0.75rem;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: var(--font-sans);
+    background: var(--color-bg);
+    color: var(--color-fg);
+    min-height: 100vh;
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 9999;
+    background: repeating-linear-gradient(
+      0deg, transparent, transparent 2px,
+      rgba(0, 0, 0, 0.03) 2px, rgba(0, 0, 0, 0.03) 4px
+    );
+  }
+
+  header {
+    background: var(--navy);
+    position: relative;
+    overflow: hidden;
+  }
+  header::after {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent 0%, var(--teal) 50%, transparent 100%);
+  }
+
+  .header-inner {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 1.5rem 1.5rem 1.25rem;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    position: relative;
+    z-index: 1;
+  }
+
+  .header-brand {
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: rgba(255,255,255,0.4);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .header-brand:hover { color: var(--teal); }
+  .header-brand .dot  { color: var(--teal); }
+
+  .header-sep { width: 1px; height: 24px; background: rgba(255,255,255,0.15); flex-shrink: 0; }
+
+  .logo {
+    font-family: var(--font-sans);
+    font-size: clamp(1.1rem, 2vw, 1.4rem);
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    background: linear-gradient(135deg, #fff 40%, var(--teal) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    line-height: 1.15;
+    white-space: nowrap;
+  }
+
+  .badge {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    font-weight: 600;
+    font-family: var(--font-mono);
+  }
+  .badge--teal  { background: var(--teal-muted); color: var(--teal); border: 1px solid rgba(45,212,191,0.3); }
+  .badge--slate { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.6); border: 1px solid rgba(255,255,255,0.15); }
+
+  .algo-select {
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15);
+    color: rgba(255,255,255,0.8);
+    border-radius: 6px;
+    padding: 3px 8px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    cursor: pointer;
+    outline: none;
+    transition: all 0.15s;
+  }
+  .algo-select:hover, .algo-select:focus { border-color: var(--teal); color: #fff; }
+  .algo-select option { background: var(--navy-light); color: #fff; }
+
+  .header-spacer { flex: 1; }
+
+  .log-count {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: rgba(255,255,255,0.35);
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+  }
+  .log-count span { color: rgba(255,255,255,0.7); }
+
+  .status-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.2);
+    transition: background 0.3s;
+    flex-shrink: 0;
+  }
+  .status-dot--ready { background: var(--color-ok); box-shadow: 0 0 6px var(--color-ok); }
+  .status-dot--busy  { background: var(--color-warn); animation: pulse 1s infinite; }
+
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .panels {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    height: calc(100vh - 53px);
+    background: var(--color-bg);
+  }
+
+  .panel {
+    padding: 20px;
+    overflow-y: auto;
+    border-right: 1px solid var(--color-border);
+    background: var(--surface);
+  }
+  .panel:last-child { border-right: none; }
+
+  .panel__header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 18px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .panel__title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--color-mid); }
+
+  .section { margin-bottom: 18px; }
+
+  .section__label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--color-muted);
+    margin-bottom: 8px;
+  }
+
+  label { display: block; font-size: 11px; color: var(--color-mid); margin-bottom: 5px; }
+
+  input, textarea {
+    width: 100%;
+    background: var(--color-panel);
+    border: 1px solid var(--color-border2);
+    color: var(--color-fg);
+    padding: 7px 10px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    transition: border-color 0.15s;
+  }
+  input:focus, textarea:focus {
+    outline: none;
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.1);
+  }
+  textarea { resize: vertical; min-height: 70px; line-height: 1.5; }
+
+  .field { margin-bottom: 12px; }
+  .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 6px; }
+
+  .claims-list { display: flex; flex-direction: column; gap: 6px; }
+
+  .claim-pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr 24px;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .remove-claim-btn {
+    background: none;
+    border: 1px solid var(--color-border2);
+    color: var(--color-muted);
+    cursor: pointer;
+    border-radius: 3px;
+    font-size: 14px;
+    line-height: 1;
+    padding: 2px 4px;
+    transition: all 0.15s;
+  }
+  .remove-claim-btn:hover {
+    border-color: var(--color-err);
+    color: var(--color-err);
+    background: rgba(224, 92, 92, 0.08);
+  }
+
+  .add-claim-btn {
+    background: none;
+    border: 1px dashed var(--color-border2);
+    color: var(--color-muted);
+    cursor: pointer;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 6px 10px;
+    width: 100%;
+    margin-top: 4px;
+    transition: all 0.15s;
+    letter-spacing: 0.04em;
+  }
+  .add-claim-btn:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+    background: rgba(74, 158, 255, 0.06);
+  }
+
+  .btn {
+    display: block;
+    width: 100%;
+    padding: 10px 16px;
+    border: none;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    letter-spacing: 0.04em;
+    transition: all 0.15s;
+    text-transform: uppercase;
+  }
+  .btn--primary          { background: var(--color-accent); color: #fff; }
+  .btn--primary:hover    { background: #3d8ee8; }
+  .btn--primary:disabled { background: var(--color-border2); color: var(--color-muted); cursor: not-allowed; }
+  .btn--secondary        { background: var(--color-panel); border: 1px solid var(--color-border2); color: var(--color-mid); }
+  .btn--secondary:hover  { border-color: var(--color-accent); color: var(--color-accent); }
+
+  .btn-hint { font-size: 10px; color: var(--color-muted); text-align: center; margin-top: 6px; letter-spacing: 0.04em; }
+
+  .pill-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+
+  /* ── Preset context card ──────────────────────────────────────────────── */
+  .preset-context {
+    font-size: 11px;
+    line-height: 1.55;
+    color: var(--slate-600);
+    background: rgba(100,116,139,0.05);
+    border: 1px solid var(--slate-200);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    display: none;
+  }
+  .preset-context.visible { display: block; }
+  .preset-context__title {
+    font-weight: 700;
+    font-size: 11px;
+    color: var(--slate-700);
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    margin-bottom: 5px;
+  }
+  .preset-context__row {
+    display: grid;
+    grid-template-columns: 76px 1fr;
+    gap: 2px 8px;
+    margin-top: 3px;
+  }
+  .preset-context__key { color: var(--slate-500); font-weight: 600; }
+  .preset-context__val { color: var(--slate-700); }
+
+  .pill {
+    background: var(--color-panel);
+    border: 1px solid var(--color-border2);
+    color: var(--color-mid);
+    padding: 5px 12px;
+    border-radius: 20px;
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.03em;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .pill:hover         { border-color: var(--color-accent); color: var(--color-fg); }
+  .pill--active       { background: rgba(74,158,255,0.12); border-color: var(--color-accent); color: var(--color-accent); font-weight: 600; }
+  .pill--active:hover { background: rgba(74,158,255,0.18); }
+
+  .tamper-grid { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+
+  .tamper-btn {
+    background: var(--color-panel);
+    border: 1px solid var(--color-border);
+    color: var(--color-mid);
+    padding: 7px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    flex: 1;
+    text-align: center;
+    transition: all 0.15s;
+  }
+  .tamper-btn:hover { border-color: var(--color-err); color: var(--color-err); }
+
+  .inline-btn {
+    background: none;
+    border: none;
+    color: var(--color-accent);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 2px 0;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .inline-btn:hover { color: var(--color-bright); }
+
+  .info-block {
+    background: var(--color-panel);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+  }
+
+  .kv { display: flex; gap: 8px; margin-bottom: 3px; font-size: 11px; }
+  .kv:last-child { margin-bottom: 0; }
+  .kv__key { color: var(--color-muted); flex-shrink: 0; min-width: 80px; }
+  .kv__val { color: var(--color-accent); word-break: break-all; }
+  .kv__val--ok { color: var(--color-ok); }
+
+  .hex-block {
+    background: var(--color-panel);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    padding: 10px 12px;
+    font-size: 10.5px;
+    color: var(--color-accent2);
+    word-break: break-all;
+    max-height: 100px;
+    overflow-y: auto;
+    line-height: 1.6;
+    letter-spacing: 0.03em;
+  }
+
+  .hr { border: none; border-top: 1px solid var(--color-border); margin: 16px 0; }
+
+  .qr-center { text-align: center; }
+  .qr-wrap { display: inline-block; padding: 16px; background: #fff; border-radius: 6px; margin: 0 auto 14px; }
+  .qr-caption { font-size: 10px; color: var(--color-muted); margin-top: 8px; }
+
+  .rotate-control {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--color-panel);
+    border: 1px solid var(--color-border2);
+    border-radius: 4px;
+    padding: 8px 12px;
+    margin-top: 8px;
+  }
+  .rotate-control__label { font-size: 11px; color: var(--color-fg); font-weight: 600; letter-spacing: 0.02em; }
+  .rotate-control__sub   { font-size: 10px; color: var(--color-muted); margin-top: 2px; }
+  .rotate-interval-input {
+    width: 40px; padding: 1px 4px; font-size: 10px; border-radius: 3px;
+    background: #fff; border: 1px solid var(--slate-300); color: var(--slate-900);
+    display: inline; text-align: center; margin: 0 2px;
+  }
+  .rotate-toggle {
+    background: none;
+    border: 1px solid var(--color-border2);
+    color: var(--color-mid);
+    border-radius: 20px;
+    padding: 4px 14px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    cursor: pointer;
+    letter-spacing: 0.06em;
+    transition: all 0.2s;
+    white-space: nowrap;
+    text-transform: uppercase;
+    min-width: 52px;
+  }
+  .rotate-countdown {
+    font-size: 11px;
+    color: var(--color-warn);
+    letter-spacing: 0.04em;
+    margin-top: 6px;
+    text-align: center;
+    padding: 5px 10px;
+    background: rgba(244, 162, 97, 0.07);
+    border: 1px solid rgba(244, 162, 97, 0.2);
+    border-radius: 4px;
+  }
+
+  .cred-card { border-radius: 6px; padding: 14px 16px; margin-bottom: 12px; border: 1px solid; }
+  .cred-card__header { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid rgba(0,0,0,0.06); }
+  .cred-card__icon   { font-size: 28px; line-height: 1; }
+  .cred-card__title  { font-size: 14px; font-weight: 700; color: var(--slate-900); letter-spacing: -0.01em; }
+  .cred-card__sub    { font-size: 9px; color: var(--slate-500); text-transform: uppercase; letter-spacing: 0.06em; word-break: break-word; max-width: 100%; }
+  .cred-card__fields { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 11px; }
+  .cred-field-key    { color: var(--color-muted); white-space: nowrap; padding-top: 1px; }
+  .cred-field-val    { color: var(--color-fg); font-weight: 500; word-break: break-word; }
+  .cred-field-val--highlight { color: var(--slate-900); font-size: 13px; font-weight: 700; }
+  .cred-card__expiry { font-size: 10px; margin-top: 10px; padding-top: 8px; border-top: 1px solid; display: flex; justify-content: space-between; }
+
+  .cred-card--ticket  { background: rgba(74,158,255,0.06);  border-color: rgba(74,158,255,0.2); }
+  .cred-card--ticket  .cred-card__expiry { border-color: rgba(74,158,255,0.15); color: rgba(74,158,255,0.7); }
+  .cred-card--rx      { background: rgba(123,200,164,0.06); border-color: rgba(123,200,164,0.2); }
+  .cred-card--rx      .cred-card__expiry { border-color: rgba(123,200,164,0.15); color: rgba(123,200,164,0.7); }
+  .cred-card--badge   { background: rgba(244,162,97,0.06);  border-color: rgba(244,162,97,0.2); }
+  .cred-card--badge   .cred-card__expiry { border-color: rgba(244,162,97,0.15); color: rgba(244,162,97,0.7); }
+  .cred-card--package { background: rgba(139,148,158,0.06); border-color: rgba(139,148,158,0.2); }
+  .cred-card--package .cred-card__expiry { border-color: rgba(139,148,158,0.15); color: rgba(139,148,158,0.7); }
+  .cred-card--member  { background: rgba(188,140,255,0.06); border-color: rgba(188,140,255,0.2); }
+  .cred-card--member  .cred-card__expiry { border-color: rgba(188,140,255,0.15); color: rgba(188,140,255,0.7); }
+  .cred-card--mdl     { background: rgba(99,179,237,0.06);  border-color: rgba(99,179,237,0.25); }
+  .cred-card--mdl     .cred-card__expiry { border-color: rgba(99,179,237,0.15); color: rgba(99,179,237,0.7); }
+  .cred-card--mdl     .cred-card__sub    { font-size: 9px; }
+
+  .step-list { display: flex; flex-direction: column; gap: 4px; }
+  .step {
+    display: flex; gap: 10px; align-items: flex-start;
+    padding: 7px 10px; border-radius: 4px; border: 1px solid transparent; font-size: 11px;
+  }
+  .step--ok   { background: rgba(86,211,100,0.05); border-color: rgba(86,211,100,0.15); }
+  .step--fail { background: rgba(224,92,92,0.07);  border-color: rgba(224,92,92,0.2); }
+  .step__icon           { flex-shrink: 0; margin-top: 1px; }
+  .step--ok   .step__icon { color: var(--color-ok); }
+  .step--fail .step__icon { color: var(--color-err); }
+  .step__name   { color: var(--color-fg); font-weight: 600; letter-spacing: 0.02em; }
+  .step__detail { color: var(--color-mid); font-size: 10.5px; line-height: 1.5; margin-top: 2px; word-break: break-all; }
+
+  .result-banner {
+    padding: 10px 14px; border-radius: 4px; font-size: 13px; font-weight: 600;
+    letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 14px; text-align: center;
+  }
+  .result-banner--valid   { background: rgba(86,211,100,0.12); color: var(--color-ok); border: 1px solid rgba(86,211,100,0.3); }
+  .result-banner--invalid { background: rgba(224,92,92,0.12);  color: var(--color-err); border: 1px solid rgba(224,92,92,0.3); }
+
+  .verify-meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .verify-meta-chip {
+    font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 0.06em; text-transform: uppercase; padding: 2px 8px;
+    border-radius: 4px; border: 1px solid;
+  }
+  .verify-meta-chip--algo  { background: var(--teal-muted); color: var(--teal-dark); border-color: rgba(20,184,166,0.3); }
+  .verify-meta-chip--proof { background: rgba(100,116,139,0.08); color: var(--slate-500); border-color: var(--slate-200); }
+  .verify-meta-chip--batch { background: rgba(100,116,139,0.08); color: var(--slate-500); border-color: var(--slate-200); }
+
+  .offline-control {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--color-panel); border: 1px solid var(--color-border2);
+    border-radius: 4px; padding: 8px 12px; margin-bottom: 12px;
+  }
+  .offline-control.active { border-color: rgba(244,162,97,0.5); background: rgba(244,162,97,0.05); }
+  .offline-control input[type="checkbox"] { width: auto; margin: 0; cursor: pointer; }
+  .offline-label { font-size: 11px; color: var(--color-fg); cursor: pointer; }
+  .offline-sub   { font-size: 10px; color: var(--color-muted); margin-top: 1px; }
+
+  .payload-input { min-height: 80px; font-size: 11px; line-height: 1.5; color: var(--color-accent2); }
+
+  .init-overlay {
+    position: fixed; inset: 0; background: var(--navy);
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 12px; z-index: 100; transition: opacity 0.4s;
+  }
+  .init-overlay.hidden { opacity: 0; pointer-events: none; }
+  .init-logo { font-size: 32px; color: var(--color-bright); font-weight: 800; }
+  .init-msg  { font-size: 12px; color: rgba(255,255,255,0.5); letter-spacing: 0.08em; text-transform: uppercase; }
+  .init-bar  { width: 200px; height: 2px; background: var(--color-border); border-radius: 1px; overflow: hidden; }
+  .init-bar__fill { height: 100%; background: var(--color-accent); width: 0; animation: fill 1.2s ease forwards; }
+  @keyframes fill { from { width: 0; } to { width: 100%; } }
+
+  ::-webkit-scrollbar       { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: var(--color-bg); }
+  ::-webkit-scrollbar-thumb { background: var(--color-border2); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="init-overlay" id="js-init-overlay">
+  <div class="init-logo">MTA-QR</div>
+  <div class="init-msg" id="js-init-msg">Generating keys…</div>
+  <div class="init-bar"><div class="init-bar__fill"></div></div>
+</div>
+
+<header>
+  <div class="header-inner">
+    <a class="header-brand" href="https://peculiarventures.com" target="_blank" rel="noopener">
+      Peculiar Ventures <span class="dot">·</span>
+    </a>
+    <div class="header-sep"></div>
+    <div><div class="logo">MTA-QR</div></div>
+
+    <select class="algo-select" id="js-algo-select" onchange="onAlgorithmChange()"
+      title="Signing algorithm. Witnesses always use Ed25519.">
+      <option value="ed25519">Ed25519</option>
+      <option value="ml-dsa44">ML-DSA-44 (PQC)</option>
+    </select>
+
+    <select class="algo-select" id="js-mode-select" onchange="onModeChange()"
+      title="Mode 1: embedded proof (offline, two-level tree). Mode 2: fetched proof (online, flat tree).">
+      <option value="1">Mode 1 · Offline (two-level)</option>
+      <option value="2">Mode 2 · Online (flat tree)</option>
+    </select>
+
+    <div class="header-spacer"></div>
+    <span class="log-count">
+      <span id="js-log-entry-count">0</span> entries
+      <span style="opacity:0.4;margin:0 2px;">·</span>
+      <span id="js-batch-count">0</span> batches
+    </span>
+    <div class="status-dot" id="js-status-dot"></div>
+  </div>
+</header>
+
+<div class="panels">
+
+  <!-- ── Issuer ─────────────────────────────────────────────────────────── -->
+  <div class="panel">
+    <div class="panel__header">
+      <span class="panel__title">Issuer</span>
+      <span class="badge badge--slate" id="js-origin-badge" style="font-size:9px;">loading…</span>
+    </div>
+
+    <div class="section">
+      <div class="section__label">Preset</div>
+      <div class="pill-list">
+        <button class="pill"           id="js-pill-custom"      onclick="selectPreset('custom')">✏️ Custom</button>
+        <button class="pill"           id="js-pill-ticket"      onclick="selectPreset('ticket')">🎫 Ticket</button>
+        <button class="pill"           id="js-pill-rx"          onclick="selectPreset('rx')">💊 Prescription</button>
+        <button class="pill"           id="js-pill-badge"       onclick="selectPreset('badge')">🏢 Badge</button>
+        <button class="pill"           id="js-pill-package"     onclick="selectPreset('package')">📦 Package</button>
+        <button class="pill pill--active" id="js-pill-membership" onclick="selectPreset('membership')">🔄 Membership</button>
+        <button class="pill"           id="js-pill-mdl"         onclick="selectPreset('mdl')">🪪 mDL Issuance (18013-5)</button>
+      </div>
+    </div>
+
+    <!-- Preset context card — filled by selectPreset() -->
+    <div class="preset-context" id="js-preset-context"></div>
+
+    <hr class="hr" style="margin-top:0;">
+
+    <div class="section">
+      <div class="field-row">
+        <div class="field">
+          <label for="js-schema-id">Schema ID</label>
+          <input type="number" id="js-schema-id" value="1005" min="1">
+        </div>
+        <div class="field">
+          <label for="js-ttl">TTL (seconds)</label>
+          <input type="number" id="js-ttl" value="10" min="10">
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Claims</label>
+        <div class="claims-list" id="js-claims-list"></div>
+        <button class="add-claim-btn" onclick="addClaimRow()">+ add claim field</button>
+      </div>
+
+      <div class="rotate-control">
+        <div>
+          <div class="rotate-control__label">Auto-rotate</div>
+          <div class="rotate-control__sub">
+            Re-issue every
+            <input type="number" class="rotate-interval-input" id="js-rotate-interval"
+              value="10" min="5" max="300" oninput="onRotateIntervalChange()">
+            seconds
+          </div>
+        </div>
+        <button class="rotate-toggle" id="js-rotate-toggle" onclick="toggleRotation()">OFF</button>
+      </div>
+      <div class="rotate-countdown" id="js-rotate-countdown" style="display:none;"></div>
+    </div>
+
+    <button class="btn btn--primary" id="js-issue-btn" onclick="issueFromForm()" disabled>
+      Issue QR Code
+    </button>
+    <div class="btn-hint" id="js-issue-hint">Add at least one claim with a key and value</div>
+
+    <div id="js-issue-result" style="display:none; margin-top:18px;">
+      <hr class="hr" style="margin-top:0;">
+      <div class="qr-center" style="margin-bottom:14px;">
+        <div class="qr-wrap"><canvas id="js-qr-canvas"></canvas></div>
+        <div class="qr-caption" id="js-qr-caption"></div>
+      </div>
+      <div id="js-issuer-cred-card"></div>
+      <div class="section__label" style="margin-top:12px;">Protocol metadata</div>
+      <div class="info-block">
+        <div class="kv"><span class="kv__key">entry_index</span><span class="kv__val" id="js-r-entry-index">—</span></div>
+        <div class="kv"><span class="kv__key">tree_size</span><span class="kv__val" id="js-r-tree-size">—</span></div>
+        <div class="kv"><span class="kv__key">expires</span><span class="kv__val" id="js-r-expires">—</span></div>
+        <div class="kv"><span class="kv__key">proof hashes</span><span class="kv__val" id="js-r-proof-len">—</span></div>
+        <div class="kv"><span class="kv__key">payload bytes</span><span class="kv__val" id="js-r-payload-size">—</span></div>
+      </div>
+      <div class="section__label">Payload (base64url → QR content)</div>
+      <div class="hex-block" id="js-r-payload-b64"></div>
+      <div style="margin-top:14px;">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px;">
+          <div class="section__label" style="margin-bottom:0;">Edit payload · tamper cases</div>
+          <button class="inline-btn" onclick="resetTamperEditor()" id="js-reset-tamper" style="display:none;">↺ reset</button>
+        </div>
+        <textarea id="js-tamper-editor" class="payload-input" rows="4"
+          style="min-height:64px;font-size:10.5px;"
+          placeholder="Issued payload appears here for editing…"
+          oninput="onTamperEditorChange()"></textarea>
+        <div class="tamper-grid">
+          <button class="tamper-btn" onclick="applyTamper('flip-proof')">⚡ Flip proof byte</button>
+          <button class="tamper-btn" onclick="applyTamper('truncate')">✂️ Truncate</button>
+          <button class="tamper-btn" onclick="applyTamper('corrupt-tbs')">✏️ Corrupt TBS</button>
+          <button class="tamper-btn" onclick="applyTamper('zero-proof')">🚫 Zero proof</button>
+        </div>
+        <button class="btn btn--secondary" style="margin-top:8px;" onclick="sendToVerifier()">
+          → Send to verifier
+        </button>
+      </div>
+    </div>
+
+    <hr class="hr">
+    <div class="section">
+      <div class="section__label">Issuer state</div>
+      <div class="info-block">
+        <div class="kv"><span class="kv__key">origin</span><span class="kv__val" style="font-size:10px;" id="js-s-origin">—</span></div>
+        <div class="kv"><span class="kv__key">issuer key</span><span class="kv__val" id="js-s-pubkey">—</span></div>
+        <div class="kv"><span class="kv__key">witnesses</span><span class="kv__val kv__val--ok" id="js-s-witnesses">—</span></div>
+        <div class="kv"><span class="kv__key">checkpoint</span><span class="kv__val" id="js-s-checkpoint">—</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Verifier ────────────────────────────────────────────────────────── -->
+  <div class="panel">
+    <div class="panel__header">
+      <span class="panel__title">Verifier</span>
+      <span class="badge badge--teal">15-step trace</span>
+    </div>
+
+    <div class="offline-control" id="js-offline-control">
+      <input type="checkbox" id="js-offline-toggle" onchange="onOfflineToggle()">
+      <div>
+        <label class="offline-label" for="js-offline-toggle">Simulate offline</label>
+        <div class="offline-sub">Mode 1: cache hits pass, misses fail · Mode 2: proof fetch always fails</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="field">
+        <label for="js-verify-input">Payload (base64url or hex)</label>
+        <textarea class="payload-input" id="js-verify-input"
+          placeholder="Paste payload here, or use → Send to verifier…"></textarea>
+      </div>
+      <button class="btn btn--primary" id="js-verify-btn" onclick="verifyPayload()" disabled>
+        Verify Payload
+      </button>
+      <div class="btn-hint" id="js-verify-hint">Paste a payload above to verify</div>
+    </div>
+
+    <div id="js-verify-result" style="display:none; margin-top:16px;">
+      <div class="result-banner" id="js-result-banner"></div>
+      <div id="js-verify-meta" style="display:none; margin-bottom:12px;" class="verify-meta"></div>
+      <div id="js-verifier-cred-card" style="display:none; margin-bottom:12px;"></div>
+      <div class="section__label">Verification trace</div>
+      <div class="step-list" id="js-step-list"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Nayuki QR Code generator v1.8.0 (MIT) — injected by build.py ──── -->
+<script>
+/* {{NAYUKI_QR}} */
+</script>
+
+<!-- ── @noble/post-quantum v0.5.4 IIFE (MIT) — injected by build.py ──── -->
+<script>
+/* {{NOBLE_PQ}} */
+</script>
+
+<script type="module">
+// ── Library accessors ────────────────────────────────────────────────────
+// Both libraries are injected by build.py as plain <script> tags.
+// These thin wrappers keep the application code unchanged.
+function loadQrLib()   { return Promise.resolve(window.qrcodegen); }
+function loadMlDsa44() { return Promise.resolve(window.__noble_pq.ml_dsa44); }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Two-level tiled Merkle tree — Mode 1 (offline embedded proof).
+ *
+ * Mode 1 uses TWO trees to bound the embedded proof to 8 hashes forever:
+ *   Inner (batch) tree: BATCH_SIZE entries → ≤ BATCH_LOG2 inner proof hashes
+ *   Outer (parent) tree: one leaf per batch → ≤ BATCH_LOG2 outer proof hashes
+ *   Maximum total proof: 8 hashes = 256 bytes, regardless of log size.
+ *
+ * Mode 2 uses a FLAT tree (tlog-tiles compatible). No proof is embedded;
+ * the verifier fetches it from the log server at scan time.
+ *
+ * See SCALABILITY.md for throughput analysis and production strategies.
+ * See ARCHITECTURE.md §Design decisions for the flat-vs-tiled trade-offs.
+ */
+const BATCH_SIZE        = 16;  // entries per inner batch (power of 2)
+const BATCH_LOG2        = 4;   // log₂(BATCH_SIZE)
+const OUTER_MAX_BATCHES = 16;  // roll outer tree after this many batches
+
+/**
+ * Signing algorithm configuration.
+ * sig_alg values match SPEC.md §Cryptography:
+ *   6 = Ed25519   (32B pubkey, 64B sig)   — Web Crypto built-in
+ *   1 = ML-DSA-44 (1312B pubkey, 2420B sig) — FIPS 204 PQC, noble/pq
+ *
+ * The algorithm is baked into the origin string so a payload signed with
+ * Ed25519 cannot be verified against an ML-DSA-44 trust anchor, and vice
+ * versa. The sig_alg byte in the flags field provides a secondary check
+ * that prevents silent downgrade attacks.
+ */
+const ALGORITHMS = {
+  'ed25519': {
+    sigAlgId: 6,
+    label:    'Ed25519',
+    origin:   'demo.mta-qr.example/browser/ed25519/v1',
+  },
+  'ml-dsa44': {
+    sigAlgId: 1,
+    label:    'ML-DSA-44 (PQC)',
+    origin:   'demo.mta-qr.example/browser/ml-dsa44/v1',
+  },
+};
+
+const EXPIRY_GRACE_SECONDS = 600; // 10-minute clock-skew grace period
+
+const getOrigin = () => ALGORITHMS[state.algorithm].origin;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// APPLICATION STATE
+// ═══════════════════════════════════════════════════════════════════════════
+
+const state = {
+  ready:                false,
+  modeId:               1,        // 1 = Mode 1 (offline/tiled), 2 = Mode 2 (online/flat)
+  algorithm:            'ed25519',
+  issuerKeyPair:        null,
+  issuerPublicKeyBytes: null,
+  witnessKeys:          [],
+  originId:             null,
+  // Mode 1 tiled log
+  batches:              [],       // [{entries:[{tbs,entryHash}], root:Uint8Array}]
+  currentBatch:         [],       // in-progress batch
+  // Mode 2 flat log
+  flatLog:              [],       // [{tbs, entryHash}]
+  checkpoint:           null,
+  checkpointCache:      new Map(),
+  lastIssuedPayload:    null,
+};
+
+let activePreset          = 'membership';
+let rotationTimer         = null;
+let rotationSecondsRemaining = 0;
+let rotationRunning       = false;
+let simulateOffline       = false;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BINARY UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
+
+function concatBytes(...arrays) {
+  const len = arrays.reduce((s, a) => s + a.length, 0);
+  const out = new Uint8Array(len);
+  let off = 0;
+  for (const a of arrays) { out.set(a, off); off += a.length; }
+  return out;
+}
+
+function bytesToBase64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s);
+}
+
+function bytesToBase64url(bytes) {
+  return bytesToBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+function base64urlToBytes(b64url) {
+  let b = b64url.replace(/-/g, '+').replace(/_/g, '/');
+  while (b.length % 4) b += '=';
+  const s = atob(b);
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+
+function bytesToHex(bytes) {
+  let h = '';
+  for (let i = 0; i < bytes.length; i++) h += bytes[i].toString(16).padStart(2, '0');
+  return h;
+}
+
+function hexToBytes(hex) {
+  hex = hex.trim().replace(/\s/g, '');
+  if (hex.length % 2) throw new Error('hex: odd length');
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    const v = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    if (isNaN(v)) throw new Error(`hex: invalid at ${i * 2}`);
+    out[i] = v;
+  }
+  return out;
+}
+
+function writeBE64(value) {
+  const n = typeof value === 'bigint' ? value : BigInt(Math.trunc(Number(value)));
+  const b = new Uint8Array(8);
+  const v = new DataView(b.buffer);
+  v.setUint32(0, Number((n >> 32n) & 0xFFFFFFFFn), false);
+  v.setUint32(4, Number(n & 0xFFFFFFFFn), false);
+  return b;
+}
+
+function readBE64(bytes, off) {
+  if (off + 8 > bytes.length) throw new Error(`readBE64: overrun at ${off}`);
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return (BigInt(v.getUint32(off, false)) << 32n) | BigInt(v.getUint32(off + 4, false));
+}
+
+function writeBE16(value) {
+  const b = new Uint8Array(2);
+  new DataView(b.buffer).setUint16(0, value, false);
+  return b;
+}
+
+function readBE16(bytes, off) {
+  if (off + 2 > bytes.length) throw new Error(`readBE16: overrun at ${off}`);
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(off, false);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DETERMINISTIC CBOR (RFC 8949 §4.2)
+// ═══════════════════════════════════════════════════════════════════════════
+// Non-canonical CBOR causes silent Merkle proof failures: the verifier
+// recomputes entry_hash from TBS bytes; if the issuer encoded differently
+// the hashes diverge and the proof path doesn't exist in the tree.
+
+function cborUint(v) {
+  if (v < 24)      return new Uint8Array([v]);
+  if (v < 256)     return new Uint8Array([24, v]);
+  if (v < 65536)   return new Uint8Array([25, v >> 8, v & 0xff]);
+  return new Uint8Array([26, (v>>>24)&0xff, (v>>>16)&0xff, (v>>>8)&0xff, v&0xff]);
+}
+
+function cborHeader(mt, v) {
+  const h = new Uint8Array(cborUint(v)); h[0] |= (mt << 5); return h;
+}
+
+function cborEncode(value) {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0)
+    return cborHeader(0, value);
+  if (typeof value === 'string') {
+    const e = new TextEncoder().encode(value);
+    return concatBytes(cborHeader(3, e.length), e);
+  }
+  if (Array.isArray(value)) {
+    const parts = [cborHeader(4, value.length)];
+    for (const item of value) parts.push(cborEncode(item));
+    return concatBytes(...parts);
+  }
+  if (value instanceof Map) {
+    const pairs = [];
+    for (const [k, v] of value) pairs.push([cborEncode(k), cborEncode(v)]);
+    pairs.sort((a, b) => {
+      const ml = Math.min(a[0].length, b[0].length);
+      for (let i = 0; i < ml; i++) if (a[0][i] !== b[0][i]) return a[0][i] - b[0][i];
+      return a[0].length - b[0].length;
+    });
+    const parts = [cborHeader(5, pairs.length)];
+    for (const [k, v] of pairs) { parts.push(k); parts.push(v); }
+    return concatBytes(...parts);
+  }
+  throw new Error(`cborEncode: unsupported type '${typeof value}'`);
+}
+
+function cborDecode(bytes, off) {
+  if (off >= bytes.length) throw new Error(`cborDecode: end at ${off}`);
+  const fb = bytes[off++];
+  const mt = fb >> 5;
+  const ai = fb & 0x1f;
+  let arg;
+  if      (ai <= 23) arg = ai;
+  else if (ai === 24) arg = bytes[off++];
+  else if (ai === 25) { arg = (bytes[off] << 8) | bytes[off+1]; off += 2; }
+  else if (ai === 26) { arg = ((bytes[off]<<24)|(bytes[off+1]<<16)|(bytes[off+2]<<8)|bytes[off+3])>>>0; off += 4; }
+  else throw new Error(`cborDecode: bad ai ${ai}`);
+
+  switch (mt) {
+    case 0: return { value: arg, nextOffset: off };
+    case 3: { const t = new TextDecoder().decode(bytes.slice(off, off+arg)); return { value: t, nextOffset: off+arg }; }
+    case 4: {
+      const items = [];
+      for (let i = 0; i < arg; i++) { const r = cborDecode(bytes, off); items.push(r.value); off = r.nextOffset; }
+      return { value: items, nextOffset: off };
+    }
+    case 5: {
+      const map = new Map();
+      for (let i = 0; i < arg; i++) {
+        const kr = cborDecode(bytes, off); off = kr.nextOffset;
+        const vr = cborDecode(bytes, off); off = vr.nextOffset;
+        map.set(kr.value, vr.value);
+      }
+      return { value: map, nextOffset: off };
+    }
+    default: throw new Error(`cborDecode: major type ${mt}`);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SHA-256 AND RFC 6962 MERKLE TREE
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function sha256(data) {
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', data));
+}
+
+// RFC 6962 §2.1 leaf hash: SHA-256(0x00 || data)
+async function hashLeaf(data) {
+  return sha256(concatBytes(new Uint8Array([0x00]), data));
+}
+
+// RFC 6962 §2.1 internal node hash: SHA-256(0x01 || left || right)
+async function hashNode(left, right) {
+  return sha256(concatBytes(new Uint8Array([0x01]), left, right));
+}
+
+async function merkleRoot(leaves) {
+  if (!leaves.length) throw new Error('merkleRoot: empty');
+  let cur = [...leaves];
+  while (cur.length > 1) {
+    const nxt = [];
+    for (let i = 0; i + 1 < cur.length; i += 2) nxt.push(await hashNode(cur[i], cur[i+1]));
+    if (cur.length % 2 === 1) nxt.push(cur[cur.length - 1]);
+    cur = nxt;
+  }
+  return cur[0];
+}
+
+async function merkleProof(leaves, idx) {
+  if (leaves.length === 1) return [];
+  const proof = [];
+  let cur = [...leaves], i = idx;
+  while (cur.length > 1) {
+    const sib = i % 2 === 0 ? i + 1 : i - 1;
+    proof.push(sib < cur.length ? cur[sib] : cur[i]);
+    const nxt = [];
+    for (let j = 0; j + 1 < cur.length; j += 2) nxt.push(await hashNode(cur[j], cur[j+1]));
+    if (cur.length % 2 === 1) nxt.push(cur[cur.length - 1]);
+    i = Math.floor(i / 2); cur = nxt;
+  }
+  return proof;
+}
+
+async function computeRootFromProof(start, idx, size, proof) {
+  let node = start, i = idx, sz = size;
+  for (const sib of proof) {
+    if (i % 2 === 0) {
+      if (i + 1 === sz && sz % 2 === 1) { i = Math.floor(i/2); sz = Math.floor((sz+1)/2); continue; }
+      node = await hashNode(node, sib);
+    } else {
+      node = await hashNode(sib, node);
+    }
+    i = Math.floor(i/2); sz = Math.floor((sz+1)/2);
+  }
+  return node;
+}
+
+async function verifyInclusion(leaf, idx, size, proof, expected) {
+  const computed = await computeRootFromProof(leaf, idx, size, proof);
+  return bytesToHex(computed) === bytesToHex(expected);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CHECKPOINT FORMAT (c2sp.org/tlog-checkpoint)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// NOTE: the trailing \n on the root hash line is authenticated content.
+// Stripping it causes signature verification to fail.
+function fmtCheckpoint(origin, treeSize, rootHash) {
+  return `${origin}\n${treeSize}\n${bytesToBase64(rootHash)}\n`;
+}
+
+function fmtCosig(body, ts) {
+  return `cosignature/v1\ntime ${ts}\n${body}`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PAYLOAD ENCODE / DECODE
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Mode 1 layout:
+//   version(1) flags(1) originId(8) treeSize(8) entryIndex(8)
+//   proofCount(1) innerProofCount(1) proof[proofCount×32]
+//   tbsLen(2) tbs[tbsLen]
+//
+// Wire format (all modes):
+//   version(1) flags(1) originId(8) treeSize(8) entryIndex(8)
+//   proofCount(1) innerProofCount(1) proof[proofCount*32]
+//   tbsLen(2) tbs[tbsLen]
+//
+// Mode 2 always writes proofCount=0 innerProofCount=0 (no proof bytes follow).
+// Go and TypeScript always write these two bytes regardless of mode.
+// Omitting them in Mode 2 creates a binary incompatibility.
+//
+// flags = mode[1:0] | sigAlg[4:2]  (dualSig=bit5, selfDescribing=bit7)
+
+function encodePayload(originId, treeSize, entryIndex, innerProof, outerProof, tbs) {
+  const flags = (ALGORITHMS[state.algorithm].sigAlgId << 2) | state.modeId;
+  const hdr = [
+    new Uint8Array([0x01, flags]),
+    writeBE64(originId),
+    writeBE64(BigInt(treeSize)),
+    writeBE64(BigInt(entryIndex)),
+  ];
+  if (state.modeId === 1) {
+    const all = [...innerProof, ...outerProof];
+    return concatBytes(...hdr, new Uint8Array([all.length, innerProof.length]), ...all, writeBE16(tbs.length), tbs);
+  }
+  // Mode 2: write proof_count=0 inner_proof_count=0 to match Go/TS wire format
+  return concatBytes(...hdr, new Uint8Array([0, 0]), writeBE16(tbs.length), tbs);
+}
+
+function decodePayload(bytes) {
+  if (!(bytes instanceof Uint8Array)) throw new Error(`expected Uint8Array, got ${typeof bytes}`);
+  if (bytes.length < 33) throw new Error(`too short: ${bytes.length}B`); // 26B header + 2B proof counts + 2B tbsLen + 1B tbs min
+  let off = 0;
+
+  const version      = bytes[off++];
+  const flags        = bytes[off++];
+  const mode         = flags & 0x03;
+  const sigAlg       = (flags >> 2) & 0x07;
+  const dualSig      = !!(flags & 0x20);
+  const selfDescribing = !!(flags & 0x80);
+
+  const originId   = readBE64(bytes, off); off += 8;
+  const treeSize   = readBE64(bytes, off); off += 8;
+  const entryIndex = readBE64(bytes, off); off += 8;
+
+  let origin = null;
+  if (selfDescribing) {
+    const ol = readBE16(bytes, off); off += 2;
+    if (off + ol > bytes.length) throw new Error('origin overrun');
+    origin = new TextDecoder().decode(bytes.slice(off, off + ol)); off += ol;
+  }
+
+  // proof_count and inner_proof_count are always present (all modes).
+  // Mode 2 payloads must have both = 0; Mode 1 carries the actual proof.
+  if (off + 2 > bytes.length) throw new Error('missing proofCount/innerProofCount bytes');
+  const proofCount = bytes[off++];
+  let innerProofCount = bytes[off++];
+  if (innerProofCount > proofCount) throw new Error(`innerProofCount(${innerProofCount}) > proofCount(${proofCount})`);
+  if (mode === 2 && proofCount !== 0) throw new Error(`Mode 2 payload must have proofCount=0, got ${proofCount}`);
+
+  let proofHashes = [];
+  if (proofCount > 0) {
+    const pbc = proofCount * 32;
+    if (off + pbc > bytes.length) throw new Error(`proof overrun: need ${pbc}B`);
+    for (let i = 0; i < proofCount; i++) { proofHashes.push(bytes.slice(off, off + 32)); off += 32; }
+  }
+
+  const tbsLen = readBE16(bytes, off); off += 2;
+  if (tbsLen < 1) throw new Error('tbs_len < 1');
+  if (off + tbsLen > bytes.length) throw new Error('tbs overrun');
+  const tbs = bytes.slice(off, off + tbsLen);
+
+  return { version, mode, sigAlg, dualSig, selfDescribing, originId, treeSize, entryIndex, origin, proofHashes, innerProofCount, tbs };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CRYPTO — ISSUER SIGN / VERIFY
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function genIssuerKey() {
+  if (state.algorithm === 'ed25519') {
+    const kp = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+    return { keyPair: kp, publicKeyBytes: new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey)) };
+  }
+  const mlDsa44 = await loadMlDsa44();
+  const seed = crypto.getRandomValues(new Uint8Array(32));
+  const { publicKey, secretKey } = mlDsa44.keygen(seed);
+  return { keyPair: { secretKey, publicKey }, publicKeyBytes: new Uint8Array(publicKey) };
+}
+
+async function issuerSign(msg) {
+  if (state.algorithm === 'ed25519')
+    return new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, state.issuerKeyPair.privateKey, msg));
+  const mlDsa44 = await loadMlDsa44();
+  return mlDsa44.sign(msg, state.issuerKeyPair.secretKey);
+}
+
+async function issuerVerify(sig, msg, pub) {
+  if (state.algorithm === 'ed25519') {
+    const k = await crypto.subtle.importKey('raw', pub, { name: 'Ed25519' }, false, ['verify']);
+    return crypto.subtle.verify({ name: 'Ed25519' }, k, sig, msg);
+  }
+  const mlDsa44 = await loadMlDsa44();
+  return mlDsa44.verify(sig, msg, pub);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INITIALIZATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function init() {
+  document.getElementById('js-init-msg').textContent = `Generating ${ALGORITHMS[state.algorithm].label} keys…`;
+
+  const { keyPair, publicKeyBytes } = await genIssuerKey();
+  state.issuerKeyPair = keyPair;
+  state.issuerPublicKeyBytes = publicKeyBytes;
+
+  // Witnesses always Ed25519 per c2sp.org/tlog-cosignature §Key format
+  state.witnessKeys = [];
+  for (let i = 0; i < 2; i++) {
+    const wkp  = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+    const wpub = new Uint8Array(await crypto.subtle.exportKey('raw', wkp.publicKey));
+    const keyId = (await sha256(new TextEncoder().encode(`witness-${i}+${bytesToBase64(wpub)}`))).slice(0, 4);
+    state.witnessKeys.push({ keyPair: wkp, publicKeyBytes: wpub, keyId, name: `witness-${i}` });
+  }
+
+  const oh = await sha256(new TextEncoder().encode(ALGORITHMS[state.algorithm].origin));
+  state.originId = readBE64(oh, 0);
+
+  const nullTbs  = new Uint8Array([0x00]);
+  const nullHash = await hashLeaf(nullTbs);
+  state.batches           = [];
+  state.currentBatch      = [{ tbs: nullTbs, entryHash: nullHash }];
+  state.flatLog           = [{ tbs: nullTbs, entryHash: nullHash }];
+  state.checkpoint        = null;
+  state.checkpointCache   = new Map();
+  state.lastIssuedPayload = null;
+
+  await publishCheckpoint();
+
+  state.ready = true;
+  updateStatusDisplay();
+  wireEventListeners();
+  selectPreset('membership');
+
+  const ov = document.getElementById('js-init-overlay');
+  ov.classList.add('hidden');
+  setTimeout(() => { ov.style.display = 'none'; }, 500);
+  document.getElementById('js-status-dot').className = 'status-dot status-dot--ready';
+}
+
+async function onModeChange() {
+  const newMode = parseInt(document.getElementById('js-mode-select').value);
+  if (newMode === state.modeId) return;
+  state.modeId = newMode;
+  if (rotationRunning) stopRotation();
+  const nullTbs  = new Uint8Array([0x00]);
+  const nullHash = await hashLeaf(nullTbs);
+  state.batches = []; state.currentBatch = [{ tbs: nullTbs, entryHash: nullHash }];
+  state.flatLog = [{ tbs: nullTbs, entryHash: nullHash }];
+  state.checkpoint = null; state.checkpointCache = new Map(); state.lastIssuedPayload = null;
+  await publishCheckpoint();
+  document.getElementById('js-issue-result').style.display  = 'none';
+  document.getElementById('js-verify-result').style.display = 'none';
+  updateStatusDisplay();
+  selectPreset(activePreset);
+}
+
+async function onAlgorithmChange() {
+  const newAlgo = document.getElementById('js-algo-select').value;
+  if (newAlgo === state.algorithm) return;
+  state.ready = false; state.algorithm = newAlgo;
+  if (rotationRunning) stopRotation();
+  const ov = document.getElementById('js-init-overlay');
+  ov.style.display = ''; ov.classList.remove('hidden');
+  document.getElementById('js-status-dot').className = 'status-dot';
+  document.getElementById('js-issue-result').style.display  = 'none';
+  document.getElementById('js-verify-result').style.display = 'none';
+  await init();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TILED LOG
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function buildBatchRoots() {
+  const roots = state.batches.map(b => b.root);
+  if (state.currentBatch.length > 0)
+    roots.push(await merkleRoot(state.currentBatch.map(e => e.entryHash)));
+  return roots;
+}
+
+function totalEntryCount() {
+  if (state.modeId === 2) return state.flatLog.length;
+  return state.batches.reduce((s, b) => s + b.entries.length, 0) + state.currentBatch.length;
+}
+
+async function publishCheckpoint() {
+  const treeSize = totalEntryCount();
+  let rootHash;
+  if (state.modeId === 2) {
+    rootHash = await merkleRoot(state.flatLog.map(e => e.entryHash));
+  } else {
+    rootHash = await merkleRoot(await buildBatchRoots());
+  }
+
+  const body  = fmtCheckpoint(getOrigin(), treeSize, rootHash);
+  const bodyB = new TextEncoder().encode(body);
+  const isig  = await issuerSign(bodyB);
+  const ts    = Math.floor(Date.now() / 1000);
+  const cosigs = [];
+  for (const w of state.witnessKeys) {
+    const msg = new TextEncoder().encode(fmtCosig(body, ts));
+    const sig = await crypto.subtle.sign({ name: 'Ed25519' }, w.keyPair.privateKey, msg);
+    cosigs.push({ keyId: w.keyId, timestamp: ts, signature: new Uint8Array(sig) });
+  }
+  state.checkpoint = { treeSize, rootHash, bodyText: body, issuerSigBytes: isig, cosigs };
+  state.checkpointCache.set(`${getOrigin()}:${treeSize}`, rootHash);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ISSUANCE
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function issueAssertion(schemaId, ttlSeconds, claims) {
+  const now    = Math.floor(Date.now() / 1000);
+  const expiry = now + ttlSeconds;
+  const tbs    = concatBytes(
+    new Uint8Array([0x01]),
+    cborEncode(new Map([[2, [now, expiry]], [3, schemaId], [4, claims]]))
+  );
+  const entryHash = await hashLeaf(tbs);
+
+  if (state.modeId === 2) {
+    state.flatLog.push({ tbs, entryHash });
+    await publishCheckpoint();
+    const idx      = state.flatLog.length - 1;
+    const payload  = encodePayload(state.originId, state.flatLog.length, idx, [], [], tbs);
+    return { payloadBytes: payload, base64url: bytesToBase64url(payload), entryIndex: idx, treeSize: state.flatLog.length, expiryTime: expiry, proofCount: 0, innerCount: 0, outerCount: 0, claims, schemaId };
+  }
+
+  // Mode 1: append to current batch, maybe finalise
+  state.currentBatch.push({ tbs, entryHash });
+  if (state.currentBatch.length >= BATCH_SIZE) {
+    const bRoot = await merkleRoot(state.currentBatch.map(e => e.entryHash));
+    state.batches.push({ entries: state.currentBatch, root: bRoot });
+    state.currentBatch = [];
+    if (state.batches.length >= OUTER_MAX_BATCHES) {
+      state.batches = []; state.checkpointCache = new Map();
+      const nt = new Uint8Array([0x00]);
+      state.currentBatch = [{ tbs: nt, entryHash: await hashLeaf(nt) }];
+    }
+  }
+  await publishCheckpoint();
+
+  const globalIdx = totalEntryCount() - 1;
+  let batchIdx, innerIdx, batchHashes;
+  if (state.currentBatch.length > 0 &&
+      state.currentBatch[state.currentBatch.length - 1].entryHash === entryHash) {
+    batchIdx    = state.batches.length;
+    innerIdx    = state.currentBatch.length - 1;
+    batchHashes = state.currentBatch.map(e => e.entryHash);
+  } else {
+    const lb    = state.batches[state.batches.length - 1];
+    batchIdx    = state.batches.length - 1;
+    innerIdx    = lb.entries.length - 1;
+    batchHashes = lb.entries.map(e => e.entryHash);
+  }
+
+  const innerProof = await merkleProof(batchHashes, innerIdx);
+  const outerProof = await merkleProof(await buildBatchRoots(), batchIdx);
+
+  const payload = encodePayload(state.originId, totalEntryCount(), globalIdx, innerProof, outerProof, tbs);
+  return {
+    payloadBytes: payload,
+    base64url:    bytesToBase64url(payload),
+    entryIndex:   globalIdx,
+    treeSize:     totalEntryCount(),
+    expiryTime:   expiry,
+    proofCount:   innerProof.length + outerProof.length,
+    innerCount:   innerProof.length,
+    outerCount:   outerProof.length,
+    claims, schemaId,
+  };
+}
+
+async function issueFromForm() {
+  if (!state.ready) return false;
+  const schemaId = parseInt(document.getElementById('js-schema-id').value) || 1;
+  const ttlSecs  = parseInt(document.getElementById('js-ttl').value) || 3600;
+  const claims   = new Map();
+  document.querySelectorAll('.claim-pair').forEach(row => {
+    const k = row.querySelector('.claim-key-input').value.trim();
+    const v = row.querySelector('.claim-val-input').value.trim();
+    if (k) claims.set(k, v);
+  });
+  try {
+    const result = await issueAssertion(schemaId, ttlSecs, claims);
+    await renderIssueResult(result);
+    updateStatusDisplay();
+    return true;
+  } catch (e) {
+    console.error('Issue failed:', e);
+    return false;
+  }
+}
+
+async function renderIssueResult(result) {
+  const { payloadBytes, base64url, entryIndex, treeSize, expiryTime, proofCount, claims, schemaId } = result;
+  state.lastIssuedPayload = base64url;
+  document.getElementById('js-issue-result').style.display = 'block';
+  document.getElementById('js-r-entry-index').textContent  = entryIndex;
+  document.getElementById('js-r-tree-size').textContent    = treeSize;
+  document.getElementById('js-r-proof-len').textContent    = `${result.innerCount} inner + ${result.outerCount} outer = ${proofCount * 32}B`;
+  document.getElementById('js-r-payload-size').textContent = `${payloadBytes.length}B`;
+  document.getElementById('js-r-expires').textContent      = new Date(expiryTime * 1000).toLocaleString();
+  document.getElementById('js-r-payload-b64').textContent  = base64url;
+  const tamper = document.getElementById('js-tamper-editor');
+  tamper.value = base64url; tamper.style.borderColor = '';
+  document.getElementById('js-reset-tamper').style.display = 'none';
+  const co = Object.fromEntries(claims instanceof Map ? claims : Object.entries(claims));
+  document.getElementById('js-issuer-cred-card').innerHTML = buildCredCard(schemaId, co, expiryTime);
+  await renderQR(base64url, payloadBytes.length);
+}
+
+async function renderQR(text, byteCount) {
+  const canvas = document.getElementById('js-qr-canvas');
+  const QR = await loadQrLib();
+  const bytes = Array.from(new TextEncoder().encode(text));
+  const qr = QR.QrCode.encodeBinary(bytes, QR.QrCode.Ecc.MEDIUM);
+  const scale = Math.max(2, Math.floor(200 / qr.size));
+  const b = 4;
+  const px = (qr.size + b * 2) * scale;
+  canvas.width = canvas.height = px;
+  const ctx = canvas.getContext('2d');
+  for (let y = -b; y < qr.size + b; y++)
+    for (let x = -b; x < qr.size + b; x++) {
+      ctx.fillStyle = qr.getModule(x, y) ? '#000' : '#fff';
+      ctx.fillRect((x + b) * scale, (y + b) * scale, scale, scale);
+    }
+  document.getElementById('js-qr-caption').textContent =
+    `${byteCount}B · Ver.${qr.version} · ${qr.size}×${qr.size} · M ECC`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PRESET SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════
+
+const TODAY = new Date().toISOString().slice(0, 10);
+
+/**
+ * Per-preset context cards (doc-4 addition).
+ * Each card shows: real-world actors, mode rationale, key property, caveats.
+ * Displayed below the preset pills when a preset is active.
+ */
+const PRESET_CONTEXT = {
+  ticket: { title: 'Ticket — anti-fraud with offline gate verification', rows: [
+    ['Actors',    'Issuer (Ticketmaster/Eventbrite), Holder (attendee app), Verifier (gate scanner), Auditor (artist mgmt / regulator)'],
+    ['Mode',      'Mode 1 · proof embedded · rotates every 30s'],
+    ['vs SafeTix','SafeTix uses a symmetric TOTP secret — requires online check, no public auditability. MTA-QR embeds an inclusion proof: gate verifies offline, total tickets issued are publicly provable against the signed log root.'],
+    ['Oversell',  'The issuer cannot secretly mint extra tickets. Every ticket must have a valid Merkle path to the signed checkpoint. An auditor watching the log detects if issued count exceeds venue capacity.'],
+    ['PQC',       'Checkpoint signed with ML-DSA-44 (FIPS 204). The Merkle path protects individual tickets; the PQ signature protects the root against future key-theft.'],
+  ]},
+  rx: { title: 'Prescription — tamper-evident dispensing log', rows: [
+    ['Actors',   'Issuer (physician / EHR), Holder (patient), Verifier (pharmacist), Auditor (DEA / state PMP)'],
+    ['Mode',     'Mode 1 · proof embedded · TTL 7 days'],
+    ['Property', 'Each fill is a log entry. A prescription cannot be filled twice without the second entry appearing in the public log — a consistent auditor detects double-fills across pharmacy chains.'],
+    ['Offline',  'Pharmacist verifies against a cached checkpoint — no EHR connectivity required at point of dispense.'],
+  ]},
+  badge: { title: 'Access badge — auditable physical access control', rows: [
+    ['Actors',   'Issuer (IT/HR), Holder (employee), Verifier (door reader), Auditor (security / compliance)'],
+    ['Mode',     'Mode 1 · proof embedded · TTL 8 hours'],
+    ['Property', 'Badge grants are logged. A revocation entry picked up at the next checkpoint sync causes readers to reject the badge offline without a live database call.'],
+    ['Offline',  'Faraday-shielded areas, basements, and air-gapped facilities verify fully offline.'],
+  ]},
+  package: { title: 'Package — supply-chain provenance', rows: [
+    ['Actors',   'Issuer (manufacturer / shipper), Holder (label), Verifier (customs / recipient), Auditor (brand protection)'],
+    ['Mode',     'Mode 1 · proof embedded · TTL 30 days'],
+    ['Property', 'Each shipment label is a log entry. Counterfeit goods cannot carry a valid inclusion proof for a checkpoint root that predates their manufacture.'],
+    ['Offline',  'Customs inspectors verify without connectivity; proof is embedded in the label QR.'],
+  ]},
+  membership: { title: 'Membership — short-lived rotating credential', rows: [
+    ['Actors',    'Issuer (club / service), Holder (member app), Verifier (door / POS)'],
+    ['Mode',      'Mode 1 · proof embedded · rotates every 10s · TTL 10s'],
+    ['Property',  'Short TTL + fast rotation: a screenshot expires before it can be reused.'],
+    ['Demo note', 'Fastest-running preset — useful for watching batch/entry counters and confirming QR size stays bounded as entries accumulate.'],
+  ]},
+  mdl: { title: 'mDL issuance — ISO 18013-5 element names (illustrative)', rows: [
+    ['Actors',   'Issuer (DMV), Holder (wallet), Verifier (relying party), Auditor (regulator / public)'],
+    ['Mode',     'Mode 1 · proof embedded · TTL 1 year'],
+    ['Property', 'DMV logs every credential issuance. Anomalous volume is publicly detectable. Verifier checks inclusion proof offline without contacting the DMV.'],
+    ['Caveat',   'MTA-QR hashes the full claim set; mdoc MSO uses per-element ValueDigests. Full selective-disclosure compatibility requires per-element TBS digests — a spec extension.'],
+  ]},
+};
+
+const PRESETS = {
+  ticket: {
+    schema_id: 1001, ttl: 30, rotate: true, rotateIntervalSeconds: 30, issueOnLoad: true,
+    get claims() {
+      return [
+        ['event','MTA-QR Summit 2026'],['date',TODAY],['venue','Paramount Theatre, Seattle WA'],
+        ['section','Orchestra'],['row','F'],['seat','14'],['holder','Ryan Hurst'],
+        ['tier','General Admission'],['barcode','TK-'+Math.floor(Math.random()*900000+100000)],
+      ];
+    },
+  },
+  rx: {
+    schema_id: 1002, ttl: 604800, rotate: false, rotateIntervalSeconds: 30, issueOnLoad: false,
+    claims: [
+      ['patient','Natallia Hurst'],['dob','1985-03-22'],['drug','Amoxicillin 500mg capsules'],
+      ['dosage','1 capsule three times daily'],['qty','21 capsules'],['refills','0'],
+      ['prescriber','Dr. Elena Marsh, MD'],['npi','1234567890'],
+      ['pharmacy','Walgreens #4821, Bothell WA'],['rx_id','RX-'+Math.floor(Math.random()*9000000+1000000)],
+    ],
+  },
+  badge: {
+    schema_id: 1003, ttl: 28800, rotate: false, rotateIntervalSeconds: 30, issueOnLoad: false,
+    claims: [
+      ['holder','Ryan Hurst'],['title','Principal Engineer'],['org','Peculiar Ventures'],
+      ['zones','A — Lobby  |  B — Engineering  |  C — Lab'],
+      ['valid_from',TODAY+' 08:00'],['valid_to',TODAY+' 18:00'],
+      ['badge_id','PV-'+Math.floor(Math.random()*90000+10000)],
+    ],
+  },
+  package: {
+    schema_id: 1004, ttl: 2592000, rotate: false, rotateIntervalSeconds: 30, issueOnLoad: false,
+    claims: [
+      ['product','YubiKey 5C NFC (10-pack)'],['sku','YK-5C-NFC-10'],
+      ['batch','2026-Q1-B-'+Math.floor(Math.random()*900+100)],['quantity','10 units'],
+      ['origin','MFR-SE-Stockholm-01'],['destination','WA-Bothell-DC-03'],
+      ['carrier','FedEx International'],['tracking','FX'+Math.floor(Math.random()*9000000000+1000000000)],
+      ['handler','Yubico AB'],
+    ],
+  },
+  membership: {
+    schema_id: 1005, ttl: 10, rotate: true, rotateIntervalSeconds: 10, issueOnLoad: true,
+    get claims() {
+      return [
+        ['member_name','Ryan Hurst'],['member_id','M-'+Math.floor(Math.random()*99999)],
+        ['tier','Premium'],['org','Peculiar Ventures'],
+        ['issued_at',new Date().toISOString().replace('T',' ').slice(0,19)],
+      ];
+    },
+  },
+  mdl: {
+    schema_id: 18135, ttl: 31536000, rotate: true, rotateIntervalSeconds: 30, issueOnLoad: true,
+    get claims() {
+      return [
+        ['family_name','Hurst'],['given_name','Ryan'],['birth_date','1975-04-15'],
+        ['issue_date',TODAY],['expiry_date',new Date(Date.now()+31536000000).toISOString().slice(0,10)],
+        ['issuing_country','US'],['issuing_authority','WA Dept. of Licensing'],
+        ['document_number','WDL-'+Math.floor(Math.random()*9000000+1000000)],
+        ['driving_privileges','Class C — Passenger vehicles'],['age_over_21','true'],
+      ];
+    },
+  },
+};
+
+function selectPreset(name) {
+  activePreset = name;
+  document.querySelectorAll('.pill').forEach(p => p.classList.remove('pill--active'));
+  const pill = document.getElementById(`js-pill-${name}`);
+  if (pill) pill.classList.add('pill--active');
+
+  // Show context card for known presets (doc-4 addition)
+  const ctx   = PRESET_CONTEXT[name];
+  const ctxEl = document.getElementById('js-preset-context');
+  if (ctx) {
+    ctxEl.innerHTML =
+      `<div class="preset-context__title">${esc(ctx.title)}</div>` +
+      ctx.rows.map(([k, v]) =>
+        `<div class="preset-context__row">` +
+        `<span class="preset-context__key">${esc(k)}</span>` +
+        `<span class="preset-context__val">${esc(v)}</span>` +
+        `</div>`
+      ).join('');
+    ctxEl.classList.add('visible');
+  } else {
+    ctxEl.classList.remove('visible');
+  }
+
+  if (name !== 'custom') loadPreset(name);
+}
+
+function loadPreset(name) {
+  const p = PRESETS[name]; if (!p) return;
+  if (rotationRunning) stopRotation();
+  document.getElementById('js-schema-id').value = p.schema_id;
+  document.getElementById('js-ttl').value        = p.ttl;
+  document.getElementById('js-claims-list').innerHTML = '';
+  for (const [k, v] of p.claims) appendClaimRow(k, v);
+  document.getElementById('js-rotate-interval').value = p.rotateIntervalSeconds;
+  if (p.rotate) startRotation();
+  else if (p.issueOnLoad) issueFromForm();
+  checkIssueBtn();
+}
+
+function markCustom() { if (activePreset !== 'custom') selectPreset('custom'); }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTO-ROTATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+function toggleRotation() { rotationRunning ? stopRotation() : startRotation(); }
+
+function startRotation() {
+  rotationRunning = true;
+  const btn = document.getElementById('js-rotate-toggle');
+  btn.textContent = 'ON'; btn.style.borderColor = 'var(--color-ok)'; btn.style.color = 'var(--color-ok)';
+  document.getElementById('js-rotate-countdown').style.display = 'block';
+  doRotationCycle();
+  scheduleRotation();
+}
+
+function scheduleRotation() {
+  const iv = Math.max(5, parseInt(document.getElementById('js-rotate-interval').value) || 30);
+  rotationSecondsRemaining = iv; updateCountdown();
+  rotationTimer = setInterval(() => {
+    rotationSecondsRemaining--;
+    updateCountdown();
+    if (rotationSecondsRemaining <= 0) { rotationSecondsRemaining = iv; doRotationCycle(); }
+  }, 1000);
+}
+
+function stopRotation() {
+  rotationRunning = false;
+  if (rotationTimer) { clearInterval(rotationTimer); rotationTimer = null; }
+  const btn = document.getElementById('js-rotate-toggle');
+  btn.textContent = 'OFF'; btn.style.borderColor = ''; btn.style.color = '';
+  const cd = document.getElementById('js-rotate-countdown');
+  cd.style.display = 'none'; cd.textContent = '';
+}
+
+function updateCountdown() {
+  const iv = Math.max(5, parseInt(document.getElementById('js-rotate-interval').value) || 30);
+  document.getElementById('js-rotate-countdown').textContent =
+    `Next issuance in ${rotationSecondsRemaining}s · interval ${iv}s`;
+}
+
+function onRotateIntervalChange() {
+  if (!rotationRunning) return;
+  const nv = Math.max(5, parseInt(document.getElementById('js-rotate-interval').value) || 30);
+  clearInterval(rotationTimer);
+  if (rotationSecondsRemaining > nv) rotationSecondsRemaining = nv;
+  if (rotationSecondsRemaining <= 0) { rotationSecondsRemaining = nv; doRotationCycle(); }
+  updateCountdown();
+  rotationTimer = setInterval(() => {
+    rotationSecondsRemaining--;
+    updateCountdown();
+    if (rotationSecondsRemaining <= 0) { rotationSecondsRemaining = nv; doRotationCycle(); }
+  }, 1000);
+}
+
+async function doRotationCycle() {
+  document.querySelectorAll('.claim-pair').forEach(row => {
+    const ki = row.querySelector('.claim-key-input');
+    if (ki?.value === 'issued_at')
+      row.querySelector('.claim-val-input').value = new Date().toISOString().replace('T',' ').slice(0,19);
+  });
+  const ok = await issueFromForm();
+  if (ok && state.lastIssuedPayload) {
+    clearVerifyResult();
+    document.getElementById('js-verify-input').value = state.lastIssuedPayload;
+    checkVerifyBtn();
+    await verifyPayload();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TAMPER PANEL
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Mode 1 payload byte layout (not self-describing):
+//   [0]=version  [1]=flags  [2-9]=originId  [10-17]=treeSize  [18-25]=entryIndex
+//   [26]=proofCount  [27]=innerProofCount  [28..28+proofCount*32-1]=proof hashes
+//   then tbsLen(2) + tbs
+
+function applyTamper(mode) {
+  if (!state.lastIssuedPayload) return;
+
+  // Mode 2 payloads carry no embedded proof bytes. flip-proof and zero-proof
+  // would silently corrupt TBS bytes instead — wrong step, wrong lesson.
+  if (state.modeId === 2 && (mode === 'flip-proof' || mode === 'zero-proof')) {
+    alert(
+      'Mode 2 payloads carry no embedded proof — there are no proof bytes to flip.\n\n'
+      + 'Switch to Mode 1 to exercise proof-tampering cases.\n\n'
+      + 'In Mode 2 you can still use Truncate (breaks decode at step 1) '
+      + 'or Corrupt TBS (breaks entry hash → step 9 flat proof fails).'
+    );
+    return;
+  }
+
+  let bytes;
+  try { bytes = base64urlToBytes(state.lastIssuedPayload); } catch { return; }
+  const m = new Uint8Array(bytes);
+
+  if (mode === 'flip-proof') {
+    const pc = m[26];
+    if (!pc) { alert('No proof hashes — issue more entries first.'); return; }
+    const base = 28; // proof hashes start at byte 28 (after proofCount + innerProofCount)
+    m[base+0] ^= 0xff; m[base+8] ^= 0xff; m[base+16] ^= 0xff; m[base+24] ^= 0xff;
+    bytes = m;
+  } else if (mode === 'truncate') {
+    if (m.length <= 8) return;
+    bytes = m.slice(0, m.length - 8);
+  } else if (mode === 'corrupt-tbs') {
+    m[m.length-1] ^= 0xff; m[m.length-2] ^= 0xaa; m[m.length-3] ^= 0x55;
+    bytes = m;
+  } else if (mode === 'zero-proof') {
+    const pc = m[26];
+    for (let i = 0; i < pc * 32; i++) m[28 + i] = 0x00;
+    bytes = m;
+  }
+
+  const corrupted = bytesToBase64url(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+  const ed = document.getElementById('js-tamper-editor');
+  ed.value = corrupted; ed.style.borderColor = 'rgba(224,92,92,0.6)';
+  document.getElementById('js-reset-tamper').style.display = 'inline';
+  // Auto-send so the failure is immediately visible (doc-4 UX improvement)
+  sendToVerifier();
+}
+
+function onTamperEditorChange() {
+  const ed = document.getElementById('js-tamper-editor');
+  const dirty = ed.value.trim() !== (state.lastIssuedPayload || '').trim();
+  ed.style.borderColor = dirty ? 'rgba(244,162,97,0.6)' : '';
+  document.getElementById('js-reset-tamper').style.display = dirty ? 'inline' : 'none';
+}
+
+function resetTamperEditor() {
+  const ed = document.getElementById('js-tamper-editor');
+  ed.value = state.lastIssuedPayload || ''; ed.style.borderColor = '';
+  document.getElementById('js-reset-tamper').style.display = 'none';
+}
+
+function sendToVerifier() {
+  const payload = document.getElementById('js-tamper-editor').value.trim();
+  if (!payload) return;
+  clearVerifyResult();
+  document.getElementById('js-verify-input').value = payload;
+  checkVerifyBtn();
+  document.querySelector('.panel:last-child').scrollTop = 0;
+  verifyPayload();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VERIFICATION (15-step trace)
+// ═══════════════════════════════════════════════════════════════════════════
+
+function clearVerifyResult() {
+  document.getElementById('js-verify-result').style.display = 'none';
+  document.getElementById('js-verify-meta').style.display   = 'none';
+}
+
+function setVerifyBusy(isBusy) {
+  const btn = document.getElementById('js-verify-btn');
+  const dot = document.getElementById('js-status-dot');
+  if (isBusy) {
+    btn.disabled = true; btn.textContent = 'Verifying…';
+    dot.className = 'status-dot status-dot--busy';
+  } else {
+    btn.textContent = 'Verify Payload'; checkVerifyBtn();
+    dot.className = 'status-dot status-dot--ready';
+  }
+}
+
+async function verifyPayload() {
+  if (!state.ready) return;
+  setVerifyBusy(true);
+
+  const steps = [];
+  const add  = (name, ok, detail) => steps.push({ name, ok, detail });
+  const fail = (name, detail)     => add(name, false, detail);
+  let _algo = '—', _proof = '';
+
+  const finish = (valid, schemaId=null, claims=null, expiry=null) => {
+    setVerifyBusy(false);
+    showResult(valid, steps, schemaId, claims, expiry, _algo, _proof);
+  };
+
+  const raw = document.getElementById('js-verify-input').value.trim().replace(/\s+/g, '');
+  let bytes;
+  try {
+    const isHex = /^[0-9a-fA-F]+$/.test(raw) && raw.length % 2 === 0;
+    bytes = isHex ? hexToBytes(raw) : base64urlToBytes(raw);
+  } catch (e) { fail('Decode payload', `Cannot parse: ${e.message}`); return finish(false); }
+
+  // 1 — decode
+  let p;
+  try {
+    p = decodePayload(bytes);
+    const md = { 0:'Embedded', 1:'Cached Checkpoint (offline)', 2:'Online Verification' };
+    add('Decode payload', true, `mode=${p.mode} (${md[p.mode]||'?'}) · sig_alg=${p.sigAlg} · entry=${p.entryIndex} · size=${p.treeSize}`);
+  } catch (e) { fail('Decode payload', `Malformed: ${e.message}`); return finish(false); }
+
+  // 2 — entry_index != 0
+  if (p.entryIndex === 0n) { fail('Entry index check', 'entry_index=0 reserved for null_entry — MUST reject'); return finish(false); }
+  add('Entry index check', true, `entry_index=${p.entryIndex} — valid`);
+
+  // 3 — trust anchor
+  if (p.originId !== state.originId) {
+    fail('Trust anchor lookup', `No anchor for 0x${p.originId.toString(16).padStart(16,'0')}`);
+    return finish(false);
+  }
+  add('Trust anchor lookup', true, `Found: "${getOrigin()}"`);
+
+  // 4 — origin consistency
+  if (p.selfDescribing) {
+    if (p.origin !== getOrigin()) { fail('Origin consistency', `"${p.origin}" ≠ "${getOrigin()}"`); return finish(false); }
+    add('Origin consistency', true, `Matches: "${p.origin}"`);
+  } else {
+    add('Origin consistency', true, 'Bound mode — from trust config');
+  }
+
+  // 5 — algorithm binding
+  const wantAlg = ALGORITHMS[state.algorithm].sigAlgId;
+  if (p.sigAlg !== wantAlg) {
+    fail('Algorithm binding', `payload sig_alg=${p.sigAlg}, trust config requires ${wantAlg} — possible downgrade`);
+    return finish(false);
+  }
+  add('Algorithm binding', true, `sig_alg=${p.sigAlg} (${ALGORITHMS[state.algorithm].label}) ✓`);
+  _algo = ALGORITHMS[state.algorithm].label;
+
+  // 6 — cache lookup
+  const ck = `${getOrigin()}:${p.treeSize}`;
+  const cached = state.checkpointCache.get(ck);
+  if (cached) add('Checkpoint cache', true, `Cache hit — tree_size=${p.treeSize}`);
+  else        add('Checkpoint cache', false, `Cache miss — tree_size=${p.treeSize}`);
+
+  // 7 — checkpoint fetch+verify
+  let rootHash;
+  if (cached) {
+    rootHash = cached;
+    add('Checkpoint fetch+verify', true, 'Used cached root');
+  } else if (simulateOffline) {
+    fail('Checkpoint fetch+verify', 'Offline — no network for checkpoint fetch');
+    return finish(false);
+  } else {
+    const tsN = Number(p.treeSize), total = totalEntryCount();
+    if (tsN < 1 || tsN > total) { fail('Checkpoint fetch+verify', `No checkpoint for tree_size=${p.treeSize}`); return finish(false); }
+
+    let root;
+    if (p.mode === 2) {
+      root = await merkleRoot(state.flatLog.slice(0, tsN).map(e => e.entryHash));
+    } else {
+      const bRoots = []; let rem = tsN;
+      for (const b of state.batches) {
+        if (rem <= 0) break;
+        const take = Math.min(b.entries.length, rem);
+        bRoots.push(take === b.entries.length ? b.root : await merkleRoot(b.entries.slice(0, take).map(e => e.entryHash)));
+        rem -= take;
+      }
+      if (rem > 0 && state.currentBatch.length > 0)
+        bRoots.push(await merkleRoot(state.currentBatch.slice(0, Math.min(state.currentBatch.length, rem)).map(e => e.entryHash)));
+      root = await merkleRoot(bRoots);
+    }
+
+    const body  = fmtCheckpoint(getOrigin(), tsN, root);
+    const bodyB = new TextEncoder().encode(body);
+    const freshSig = await issuerSign(bodyB);
+    if (!await issuerVerify(freshSig, bodyB, state.issuerPublicKeyBytes)) {
+      fail('Checkpoint fetch+verify', 'Issuer signature failed'); return finish(false);
+    }
+
+    let wv = 0;
+    const ts = Math.floor(Date.now() / 1000);
+    for (const w of state.witnessKeys) {
+      const cm = new TextEncoder().encode(fmtCosig(body, ts));
+      const fs = await crypto.subtle.sign({ name:'Ed25519' }, w.keyPair.privateKey, cm);
+      const wk = await crypto.subtle.importKey('raw', w.publicKeyBytes, { name:'Ed25519' }, false, ['verify']);
+      if (await crypto.subtle.verify({ name:'Ed25519' }, wk, fs, cm)) wv++;
+    }
+    if (wv < 2) { fail('Checkpoint fetch+verify', `Witness quorum failed: ${wv}/2`); return finish(false); }
+
+    state.checkpointCache.set(ck, root); rootHash = root;
+    add('Checkpoint fetch+verify', true, `${ALGORITHMS[state.algorithm].label} sig ✓ · ${wv}/2 witnesses ✓ · root ${bytesToHex(root).slice(0,16)}… (DEMO NOTE: keys in-page)`);
+  }
+
+  // 8 — entry hash
+  const eHash = await hashLeaf(p.tbs);
+  add('Entry hash', true, `SHA-256(0x00 ‖ tbs) = ${bytesToHex(eHash).slice(0,32)}…`);
+
+  // 9 — inclusion proof
+  if (p.mode === 2) {
+    if (simulateOffline) { fail('Inclusion proof', 'Offline — cannot fetch proof tiles (Mode 2 requires network)'); return finish(false); }
+    const tsN  = Number(p.treeSize), idxN = Number(p.entryIndex);
+    const flat = state.flatLog.slice(0, tsN).map(e => e.entryHash);
+    const fp   = await merkleProof(flat, idxN);
+    if (!await verifyInclusion(eHash, idxN, tsN, fp, rootHash)) {
+      fail('Inclusion proof', 'Flat tree proof failed'); return finish(false);
+    }
+    _proof = `${fp.length} hashes (fetched)`;
+    add('Inclusion proof', true, `Flat: ${fp.length} hashes → root ${bytesToHex(rootHash).slice(0,16)}… ✓`);
+  } else {
+    const inner = p.proofHashes.slice(0, p.innerProofCount);
+    const outer = p.proofHashes.slice(p.innerProofCount);
+    const gIdx  = Number(p.entryIndex);
+    // INVARIANT: gIdx is the absolute entry index within the current log generation
+    // (since last rollover). On rollover both state.batches and state.currentBatch
+    // reset to [null_entry], so gIdx restarts from 0. This means iIdx = gIdx % BATCH_SIZE
+    // correctly maps to position within the batch. If a future change persists gIdx
+    // across rollovers without also resetting the batch arrays, this will produce a
+    // wrong iIdx silently.
+    const bIdx  = Math.floor(gIdx / BATCH_SIZE);
+    const iIdx  = gIdx % BATCH_SIZE;
+    const nb    = Math.ceil(Number(p.treeSize) / BATCH_SIZE);
+    const bSz   = Math.min(BATCH_SIZE, Number(p.treeSize) - bIdx * BATCH_SIZE);
+    const bRoot = await computeRootFromProof(eHash, iIdx, bSz, inner);
+    const brH   = bytesToHex(bRoot).slice(0, 16);
+    if (!await verifyInclusion(bRoot, bIdx, nb, outer, rootHash)) {
+      fail('Inclusion proof', `Phase A: batch root ${brH}… ✓ · Phase B: outer failed`); return finish(false);
+    }
+    _proof = `${inner.length} inner + ${outer.length} outer`;
+    add('Inclusion proof', true, `Phase A: ${inner.length} inner → batch root ${brH}… ✓ · Phase B: ${outer.length} outer ✓`);
+  }
+
+  // 10 — revocation
+  add('Revocation check', true, `entry_index=${p.entryIndex} — no revoked ranges (v0.1 open item)`);
+
+  // 11 — entry type
+  if (p.tbs.length < 2) { fail('TBS decode', 'TBS too short'); return finish(false); }
+  const et = p.tbs[0];
+  if (et !== 0x01 && et !== 0x02) { fail('TBS decode', `Unknown entry_type 0x${et.toString(16)} — MUST reject`); return finish(false); }
+  add('TBS decode', true, `entry_type=0x${et.toString(16).padStart(2,'0')} (${et===1?'data_assertion':'key_assertion'})`);
+
+  // 12 — CBOR
+  let timestamps, schemaId, claims;
+  try {
+    const { value: m } = cborDecode(p.tbs, 1);
+    timestamps = m.get(2); schemaId = m.get(3); claims = m.get(4);
+    add('CBOR decode', true, `schema_id=${schemaId} issuance=${timestamps[0]} expiry=${timestamps[1]}`);
+  } catch (e) { fail('CBOR decode', `Failed: ${e.message}`); return finish(false); }
+
+  // 13 — expiry
+  const now = Math.floor(Date.now() / 1000), exp = timestamps[1];
+  if (exp + EXPIRY_GRACE_SECONDS < now) {
+    fail('Expiry check', `Expired ${Math.floor((now-exp)/60)}m ago`); return finish(false);
+  }
+  const rem = exp - now;
+  add('Expiry check', true, `Valid · ${Math.floor(rem/60)}m ${rem%60}s remaining · expires ${new Date(exp*1000).toLocaleTimeString()}`);
+
+  // 14 — possession
+  if (et === 0x02) { fail('Possession proof', 'key_assertion — challenge-response not implemented'); return finish(false); }
+  add('Possession proof', true, 'data_assertion — no possession proof required');
+
+  // 15 — done
+  add('✓ Verification complete', true, `All checks passed · entry_index=${p.entryIndex} · origin="${getOrigin()}"`);
+
+  const co = {};
+  if (claims instanceof Map) for (const [k, v] of claims) co[k] = v;
+  finish(true, schemaId, co, exp);
+}
+
+function showResult(valid, steps, schemaId, claims, expiry, algo, proofInfo) {
+  document.getElementById('js-verify-result').style.display = 'block';
+  const banner = document.getElementById('js-result-banner');
+  banner.textContent = valid ? '✓ Valid' : '✗ Invalid';
+  banner.className   = `result-banner result-banner--${valid ? 'valid' : 'invalid'}`;
+
+  const meta = document.getElementById('js-verify-meta');
+  if (algo) {
+    meta.style.display = 'flex';
+    meta.innerHTML =
+      `<span class="verify-meta-chip verify-meta-chip--algo">${esc(algo)}</span>` +
+      `<span class="verify-meta-chip verify-meta-chip--proof">${state.modeId===2?'Mode 2 · Online · flat':'Mode 1 · Offline · two-level'}</span>` +
+      (proofInfo ? `<span class="verify-meta-chip verify-meta-chip--batch">${esc(proofInfo)}</span>` : '') +
+      `<span class="verify-meta-chip verify-meta-chip--batch">${totalEntryCount()} entries</span>`;
+  } else {
+    meta.style.display = 'none';
+  }
+
+  const cc = document.getElementById('js-verifier-cred-card');
+  if (valid && claims && Object.keys(claims).length > 0) {
+    cc.style.display = 'block'; cc.innerHTML = buildCredCard(schemaId, claims, expiry);
+  } else {
+    cc.style.display = 'none'; cc.innerHTML = '';
+  }
+
+  const list = document.getElementById('js-step-list');
+  list.innerHTML = '';
+  for (const s of steps) {
+    const el = document.createElement('div');
+    el.className = `step step--${s.ok ? 'ok' : 'fail'}`;
+    el.innerHTML =
+      `<div class="step__icon">${s.ok ? '✓' : '✗'}</div>` +
+      `<div><div class="step__name">${esc(s.name)}</div><div class="step__detail">${esc(s.detail)}</div></div>`;
+    list.appendChild(el);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CREDENTIAL CARD RENDERER
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SCHEMA_DISPLAY = {
+  1001:  { css:'ticket',  icon:'🎫', title:'Event Ticket',         sub:'Venue Entry Pass' },
+  1002:  { css:'rx',      icon:'💊', title:'Prescription',          sub:'Pharmacy Authorization' },
+  1003:  { css:'badge',   icon:'🏢', title:'Access Badge',          sub:'Physical Access Credential' },
+  1004:  { css:'package', icon:'📦', title:'Package Label',         sub:'Supply Chain Provenance' },
+  1005:  { css:'member',  icon:'🔄', title:'Membership Credential', sub:'Rotating Session Pass' },
+  18135: { css:'mdl',     icon:'🪪', title:'mDL Issuance Log',       sub:'ISO/IEC 18013-5 · Illustrative (see source caveats)' },
+};
+
+const SCHEMA_FIELDS = {
+  1001: [{k:'event',h:true},{k:'date'},{k:'venue'},{k:'section'},{k:'row'},{k:'seat',h:true},{k:'holder'},{k:'tier'},{k:'barcode'}],
+  1002: [{k:'patient',h:true},{k:'dob'},{k:'drug',h:true},{k:'dosage'},{k:'qty'},{k:'refills'},{k:'prescriber'},{k:'npi'},{k:'pharmacy'},{k:'rx_id'}],
+  1003: [{k:'holder',h:true},{k:'title'},{k:'org'},{k:'zones',h:true},{k:'valid_from'},{k:'valid_to'},{k:'badge_id'}],
+  1004: [{k:'product',h:true},{k:'sku'},{k:'batch'},{k:'quantity'},{k:'origin'},{k:'destination'},{k:'carrier'},{k:'tracking'},{k:'handler'}],
+  1005: [{k:'member_name',h:true},{k:'member_id'},{k:'tier',h:true},{k:'org'},{k:'issued_at'}],
+  18135:[{k:'family_name',h:true},{k:'given_name',h:true},{k:'birth_date'},{k:'issue_date'},{k:'expiry_date'},{k:'issuing_country'},{k:'issuing_authority'},{k:'document_number',h:true},{k:'driving_privileges'},{k:'age_over_21'}],
+};
+
+function buildCredCard(schemaId, claims, expiry) {
+  const d = SCHEMA_DISPLAY[schemaId], fs = SCHEMA_FIELDS[schemaId];
+  if (!d || !fs) {
+    return `<div class="cred-card" style="background:rgba(74,158,255,0.05);border-color:rgba(74,158,255,0.2);">
+      <div class="cred-card__fields">${Object.entries(claims).map(([k,v])=>
+        `<div class="cred-field-key">${esc(k)}</div><div class="cred-field-val">${esc(String(v))}</div>`).join('')}
+      </div></div>`;
+  }
+  const rows = fs
+    .filter(f => claims[f.k] !== undefined && String(claims[f.k]).trim())
+    .map(f => `<div class="cred-field-key">${esc(f.k.replace(/_/g,' '))}</div>` +
+               `<div class="cred-field-val${f.h?' cred-field-val--highlight':''}">${esc(String(claims[f.k]))}</div>`)
+    .join('');
+  const ex = expiry ? `<div class="cred-card__expiry"><span>Expires</span><span>${new Date(expiry*1000).toLocaleString()}</span></div>` : '';
+  return `<div class="cred-card cred-card--${d.css}">
+    <div class="cred-card__header">
+      <div class="cred-card__icon">${d.icon}</div>
+      <div><div class="cred-card__title">${d.title}</div><div class="cred-card__sub">${d.sub}</div></div>
+    </div>
+    <div class="cred-card__fields">${rows}</div>${ex}
+  </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UI STATE
+// ═══════════════════════════════════════════════════════════════════════════
+
+function checkIssueBtn() {
+  if (!state.ready) return;
+  const sid = parseInt(document.getElementById('js-schema-id').value) > 0;
+  const ttl = parseInt(document.getElementById('js-ttl').value) >= 10;
+  const clm = Array.from(document.querySelectorAll('.claim-pair')).some(r =>
+    r.querySelector('.claim-key-input').value.trim() && r.querySelector('.claim-val-input').value.trim());
+  document.getElementById('js-issue-btn').disabled = !(sid && ttl && clm);
+  const hint = document.getElementById('js-issue-hint');
+  if (sid && ttl && clm) { hint.style.display = 'none'; return; }
+  hint.style.display = 'block';
+  hint.textContent = !sid ? 'Schema ID must be positive' : !ttl ? 'TTL must be ≥ 10s' : 'Add at least one claim with key and value';
+}
+
+function checkVerifyBtn() {
+  if (!state.ready) return;
+  const has = document.getElementById('js-verify-input').value.trim().replace(/\s+/g,'').length > 0;
+  document.getElementById('js-verify-btn').disabled = !has;
+  document.getElementById('js-verify-hint').style.display = has ? 'none' : 'block';
+}
+
+function onOfflineToggle() {
+  simulateOffline = document.getElementById('js-offline-toggle').checked;
+  document.getElementById('js-offline-control').classList.toggle('active', simulateOffline);
+}
+
+function wireEventListeners() {
+  ['js-schema-id','js-ttl'].forEach(id => {
+    document.getElementById(id).addEventListener('input', checkIssueBtn);
+    document.getElementById(id).addEventListener('input', markCustom);
+  });
+  document.getElementById('js-claims-list').addEventListener('input', checkIssueBtn);
+  document.getElementById('js-claims-list').addEventListener('input', markCustom);
+  document.getElementById('js-verify-input').addEventListener('input', () => {
+    checkVerifyBtn(); clearVerifyResult();
+  });
+  checkIssueBtn(); checkVerifyBtn();
+}
+
+function updateStatusDisplay() {
+  const origin = getOrigin();
+  document.getElementById('js-origin-badge').textContent = '…/' + origin.split('/').slice(-2).join('/');
+  document.getElementById('js-s-origin').textContent    = origin;
+  document.getElementById('js-s-pubkey').textContent    = state.issuerPublicKeyBytes
+    ? bytesToHex(state.issuerPublicKeyBytes).slice(0, 24) + '…' : '—';
+  document.getElementById('js-s-witnesses').textContent = `${state.witnessKeys.length} × Ed25519 (quorum 2-of-2)`;
+  const ml = state.modeId === 2 ? 'Mode 2 · flat tree' : 'Mode 1 · two-level tree';
+  const ld = state.modeId === 2
+    ? `${state.flatLog.length} entries`
+    : `${totalEntryCount()} entries · ${state.batches.length} full batches · ${state.currentBatch.length} in current`;
+  document.getElementById('js-s-checkpoint').textContent = state.checkpoint ? `${ml} · ${ld}` : '—';
+  document.getElementById('js-log-entry-count').textContent = totalEntryCount();
+  document.getElementById('js-batch-count').textContent    = state.modeId === 2
+    ? 'flat' : state.batches.length + (state.currentBatch.length > 0 ? '+1' : '');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CLAIM ROW MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+function appendClaimRow(key='', value='') {
+  const row = document.createElement('div');
+  row.className = 'claim-pair';
+  row.innerHTML =
+    `<input class="claim-key-input" type="text" placeholder="key" value="${esc(key)}">` +
+    `<input class="claim-val-input" type="text" placeholder="value" value="${esc(value)}">` +
+    `<button class="remove-claim-btn" onclick="removeClaimRow(this)" title="Remove">×</button>`;
+  document.getElementById('js-claims-list').appendChild(row);
+}
+
+function addClaimRow() { appendClaimRow(); markCustom(); checkIssueBtn(); }
+
+function removeClaimRow(btn) {
+  if (document.querySelectorAll('.claim-pair').length > 1) {
+    btn.closest('.claim-pair').remove(); markCustom(); checkIssueBtn();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
+
+function esc(t) {
+  return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Expose to window for inline onclick/onchange handlers ─────────────────
+Object.assign(window, {
+  issueFromForm, verifyPayload, selectPreset, addClaimRow, removeClaimRow,
+  applyTamper, resetTamperEditor, sendToVerifier, toggleRotation,
+  onModeChange, onAlgorithmChange, onOfflineToggle,
+  onRotateIntervalChange, onTamperEditorChange,
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BOOT
+// ═══════════════════════════════════════════════════════════════════════════
+
+init().catch(error => {
+  document.getElementById('js-init-overlay').innerHTML = `
+    <div style="color:var(--color-err);font-size:13px;padding:24px;text-align:center;">
+      Initialization failed: ${error.message}<br>
+      <small style="color:rgba(255,255,255,0.4)">
+        Requires Chrome 113+, Firefox 130+, or Safari 17+
+      </small>
+    </div>`;
+});
+</script>
+</body>
+</html>
