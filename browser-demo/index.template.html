@@ -189,6 +189,32 @@
 
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
+  /* ── Mobile tab bar ──────────────────────────────────────────────────── */
+  .tab-bar {
+    display: none;
+    background: var(--navy);
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+  }
+  .tab-bar__btn {
+    flex: 1;
+    padding: 10px;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: rgba(255,255,255,0.5);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .tab-bar__btn--active {
+    color: var(--teal);
+    border-bottom-color: var(--teal);
+  }
+
   .panels {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -203,6 +229,34 @@
     background: var(--surface);
   }
   .panel:last-child { border-right: none; }
+
+  @media (max-width: 700px) {
+    .tab-bar { display: flex; }
+
+    /* hide selects that dont fit in mobile header */
+    .header-brand, .header-sep, .header-spacer, .log-count { display: none; }
+    .header-inner { padding: 10px 12px; gap: 8px; flex-wrap: wrap; }
+    .algo-select { font-size: 10px; padding: 4px 6px; }
+
+    .panels {
+      grid-template-columns: 1fr;
+      height: auto;
+      min-height: calc(100vh - 93px);
+    }
+
+    .panel {
+      display: none;
+      border-right: none;
+      padding: 16px;
+      min-height: calc(100vh - 93px);
+    }
+    .panel--active { display: block; }
+
+    .field-row { grid-template-columns: 1fr 1fr; }
+
+    .tamper-grid { flex-wrap: wrap; }
+    .tamper-btn { flex: 1 1 calc(50% - 6px); }
+  }
 
   .panel__header {
     display: flex;
@@ -595,10 +649,15 @@
   </div>
 </header>
 
+<div class="tab-bar">
+  <button class="tab-bar__btn tab-bar__btn--active" onclick="switchTab(0)">Issuer</button>
+  <button class="tab-bar__btn" onclick="switchTab(1)">Verifier</button>
+</div>
+
 <div class="panels">
 
   <!-- ── Issuer ─────────────────────────────────────────────────────────── -->
-  <div class="panel">
+  <div class="panel panel--active" id="js-panel-issuer">
     <div class="panel__header">
       <span class="panel__title">Issuer</span>
       <span class="badge badge--slate" id="js-origin-badge" style="font-size:9px;">loading…</span>
@@ -711,7 +770,7 @@
   </div>
 
   <!-- ── Verifier ────────────────────────────────────────────────────────── -->
-  <div class="panel">
+  <div class="panel" id="js-panel-verifier">
     <div class="panel__header">
       <span class="panel__title">Verifier</span>
       <span class="badge badge--teal">15-step trace</span>
@@ -1409,8 +1468,7 @@ async function renderIssueResult(result) {
 async function renderQR(text, byteCount) {
   const canvas = document.getElementById('js-qr-canvas');
   const QR = await loadQrLib();
-  const bytes = Array.from(new TextEncoder().encode(text));
-  const qr = QR.QrCode.encodeBinary(bytes, QR.QrCode.Ecc.MEDIUM);
+  const qr = QR.QrCode.encodeText(text, QR.QrCode.Ecc.MEDIUM);
   const scale = Math.max(2, Math.floor(200 / qr.size));
   const b = 4;
   const px = (qr.size + b * 2) * scale;
@@ -1722,7 +1780,8 @@ function sendToVerifier() {
   clearVerifyResult();
   document.getElementById('js-verify-input').value = payload;
   checkVerifyBtn();
-  document.querySelector('.panel:last-child').scrollTop = 0;
+  switchTab(1);
+  document.getElementById('js-panel-verifier').scrollTop = 0;
   verifyPayload();
 }
 
@@ -2106,8 +2165,15 @@ function esc(t) {
 }
 
 // ── Expose to window for inline onclick/onchange handlers ─────────────────
+function switchTab(idx) {
+  const panels = [document.getElementById('js-panel-issuer'), document.getElementById('js-panel-verifier')];
+  const btns   = document.querySelectorAll('.tab-bar__btn');
+  panels.forEach((p, i) => p.classList.toggle('panel--active', i === idx));
+  btns.forEach((b, i)   => b.classList.toggle('tab-bar__btn--active', i === idx));
+}
+
 Object.assign(window, {
-  issueFromForm, verifyPayload, selectPreset, addClaimRow, removeClaimRow,
+  issueFromForm, verifyPayload, selectPreset, addClaimRow, removeClaimRow, switchTab,
   applyTamper, resetTamperEditor, sendToVerifier, toggleRotation,
   onModeChange, onAlgorithmChange, onOfflineToggle,
   onRotateIntervalChange, onTamperEditorChange,
