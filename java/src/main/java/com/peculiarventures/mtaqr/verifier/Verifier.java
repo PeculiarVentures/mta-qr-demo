@@ -420,11 +420,15 @@ public final class Verifier {
 
     // --- payload decoding ---
 
-    private record DecodedPayload(
+    // Public for vector tests.
+    public record DecodedPayload(
         int mode, int sigAlg, boolean selfDescrib,
         long originId, long treeSize, long entryIndex,
         String origin, List<byte[]> proofHashes, int innerCount, byte[] tbs
     ) {}
+
+    // Package-private test accessor.
+    public static DecodedPayload decodePayloadForTest(byte[] data) { return decodePayload(data); }
 
     private static DecodedPayload decodePayload(byte[] data) {
         ByteBuffer buf = ByteBuffer.wrap(data);

@@ -438,6 +438,21 @@ pub(crate) fn verify_inclusion(
 
 // --- Checkpoint ---
 
+
+/// Test-accessible wrapper for encode_tbs (private fn).
+#[cfg(test)]
+pub(crate) fn encode_tbs_pub(
+    issued_at: u64, expires_at: u64, schema_id: u64,
+    claims: &[(String, String)],
+) -> Result<Vec<u8>> {
+    encode_tbs(issued_at, expires_at, schema_id, claims)
+}
+
+/// Test-accessible wrapper for hash_node (private fn).
+#[cfg(test)]
+pub(crate) fn hash_node_pub(left: &[u8], right: &[u8]) -> Vec<u8> {
+    hash_node(left, right)
+}
 pub(crate) fn checkpoint_body(origin: &str, tree_size: u64, root_hash: &[u8]) -> Vec<u8> {
     let b64 = B64.encode(root_hash);
     format!("{origin}\n{tree_size}\n{b64}\n").into_bytes()
