@@ -886,6 +886,16 @@ without a live backend service. Classical issuers (ECDSA P-256, Ed25519)
 keep the payload size manageable. PQC Mode 0 with FN-DSA-512 adds up to 666
 bytes for the issuer signature and requires controlled print and scan conditions.
 
+**Revocation in Mode 0.** The payload is self-contained and carries no
+`revocation_url`. Revocation checking requires a separately cached artifact.
+If the verifier has fetched and cached a revocation artifact for this origin
+before going offline, it MUST apply the normal query procedure at scan time.
+If no artifact is cached and no network is available, the verifier applies
+its configured posture (fail-closed or fail-open) and records the outcome in
+the verification trace. See §Revocation — Verifier Behavior for the full
+procedure. Deployments that require hard revocation guarantees at scan time
+without a prior connectivity window must use Mode 1 or Mode 2.
+
 ### Mode 1: Cached Checkpoint (Offline After Prefetch)
 
 The QR payload includes the assertion content and inclusion proof. No signatures
@@ -908,7 +918,9 @@ not `origin_id`.
 | **Total** | **~513–563** |
 
 **Best for:** The general case — tickets, prescriptions, permits, badges,
-packages. Any issuer whose verifiers have a charge cycle.
+packages. Any issuer whose verifiers have a charge cycle. Revocation
+propagation is bounded by the charge cycle interval — acceptable for
+credentials where same-day revocation is sufficient.
 
 ### Mode 2: Online Reference
 
@@ -928,7 +940,10 @@ checkpoint and inclusion proof. Mode 2 deployments MUST serve both endpoints
 over TLS with verifiable server identity.
 
 **Best for:** High-throughput fixed-infrastructure scanning where connectivity
-is guaranteed and the smallest possible payload size is a priority.
+is guaranteed and the smallest possible payload size is a priority. Also
+the appropriate mode when revocation must be checked against the current
+artifact at every scan — the checkpoint fetch at scan time means the
+verifier can also fetch a fresh revocation artifact on every verification.
 
 ---
 
@@ -1106,7 +1121,16 @@ trust distribution requirement — it only eliminates the checkpoint fetch.
     same algorithm as Mode 1 steps 8a–8b. The root_hash from the payload is
     the expected value; it has already been authenticated in steps 6–7.
 
-10. Check entry_index not revoked. Same procedure as Mode 1 step 9.
+10. Check entry_index not revoked.
+    If a revocation artifact for this origin is cached:
+      Apply the query procedure from §Revocation — Verifier Behavior.
+    If no artifact is cached:
+      If network is available: attempt fetch from revocation_url in the
+        trust config, apply load procedure, then query.
+      If fetch fails or network is unavailable: apply the configured
+        fail-closed or fail-open posture per §Revocation — Verifier Behavior.
+    The verification trace MUST record the outcome of this step explicitly
+    regardless of which path was taken.
 
 11. Check expiry: expiry_time MUST be > (current_time - grace_period).
 
@@ -1323,20 +1347,6 @@ the artifact, not the governance of the revocation decision.
   revocation artifact. The protocol provides this guarantee cryptographically.
 - The revocation key is the same as the checkpoint signing key. Implementations
   MUST NOT accept revocation artifacts signed by any other key.
-
-**What implementations SHOULD do operationally:**
-
-- Maintain an append-only log of revocation decisions, including the identity
-  of the operator who made each decision, the reason, and the timestamp. This
-  provides an audit trail for post-hoc review.
-- Require multi-party authorization for revocation of more than N entries in a
-  single operation, as a safeguard against bulk revocation by a compromised
-  operator account.
-- Separate the key material used to produce revocation artifacts from
-  day-to-day issuance key material, using a hardware security module or
-  equivalent. The checkpoint signing key and the revocation signing key are
-  the same cryptographic key, but they can be stored in different HSM key slots
-  with different operator authorization policies.
 
 **Note on the key reuse design.** Using the same key for both checkpoints and
 revocation artifacts is a deliberate design choice that simplifies the trust
@@ -1716,6 +1726,33 @@ approximately `1.44 × n / 8` bytes plus a small constant per level.
 | 1,000 | ~1.8 KB |
 | 10,000 | ~18 KB |
 | 100,000 | ~180 KB |
+
+### Revocation Freshness by Mode
+
+The three verification modes provide different revocation freshness properties:
+
+| Mode | Revocation artifact source | Freshness bound |
+|------|---------------------------|------------------|
+| 0 (Embedded) | Cache pre-loaded before going offline | Age of cached artifact at scan time |
+| 1 (Cached checkpoint) | Fetched on charge-cycle schedule | Age since last charge cycle |
+| 2 (Online reference) | Fetched at scan time | Current at time of scan |
+
+Mode 0 verifiers that have never fetched a revocation artifact for an origin
+cannot perform a revocation check for that origin. This is a known structural
+limitation of fully offline operation.
+
+Mode 2 is the only mode that guarantees the revocation check uses the current
+artifact. A Mode 2 verifier that fetches both the checkpoint and the revocation
+artifact at scan time has a revocation view that is at most as old as the
+issuer's last artifact publication — typically seconds to minutes.
+
+Deployments where revocation must take effect quickly — for example, where a
+credential must stop working within minutes of a revocation decision — require
+either Mode 2 with fresh artifact fetches at each scan, or Mode 1 with a
+credential TTL shorter than the acceptable revocation propagation window.
+A credential with a 5-minute TTL that is also revoked provides effective
+revocation bounded by 5 minutes regardless of artifact staleness, because
+the credential expires before the next charge cycle anyway.
 
 ### References
 

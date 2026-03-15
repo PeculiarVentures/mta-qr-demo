@@ -120,8 +120,11 @@ circulated after a test key reached production. Revoking offline bearer tokens
 required pushing updates to every verifier app in 60+ countries. MTA-QR makes
 compromise detectable earlier — the log is public and witnessed — and limits
 scope: the witness quorum must also be compromised to issue forged checkpoints.
-Offline verification means revocation propagation is still a deployment concern
-that must be designed for, on the same schedule as checkpoint updates.
+Offline verification means revocation propagation is bounded by the charge
+cycle interval in Mode 1, and by the age of the pre-loaded artifact in Mode 0.
+Mode 2, which fetches the checkpoint at scan time, can also fetch a fresh
+revocation artifact at each scan — it is the only mode where revocation
+checking is current at the time of the scan rather than bounded by a prefetch.
 
 **The witness quorum prevents split-view attacks.** Witnesses only cosign a
 checkpoint after verifying it is consistent with all previous checkpoints they
