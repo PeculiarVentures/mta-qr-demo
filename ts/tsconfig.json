@@ -10,6 +10,6 @@
     "rootDir": ".",
     "declaration": true
   },
-  "include": ["shared/**/*", "issuer/**/*", "verifier/**/*"],
+  "include": ["issuer/**/*", "verifier/**/*"],
   "exclude": ["node_modules", "dist"]
 }

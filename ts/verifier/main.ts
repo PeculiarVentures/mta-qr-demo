@@ -5,14 +5,15 @@
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { createHash } from "crypto";
 
-import { decodeDataAssertion } from "../shared/cbor.js";
-import { entryHash, verifyInclusion, computeRootFromProof } from "../shared/merkle.js";
+import { decodeTbs as decodeDataAssertion } from "../sdk/src/cbor.js";
+import { entryHash, verifyInclusion, computeRootFromProof } from "../sdk/src/merkle.js";
 import {
-  verifyCheckpoint, verifyCosignature,
-  parseCheckpointBody, cosignatureV1Message, originID as computeOriginID
-} from "../shared/checkpoint.js";
-import { verify as sigVerify, SIG_ALG_ED25519, sigLen } from "../shared/signing.js";
-import { decode as decodePayload, MODE_ONLINE } from "../shared/payload.js";
+  verifyCheckpointSig as verifyCheckpoint, verifyCosignature,
+  parseCheckpointBody, cosignatureMessage as cosignatureV1Message, computeOriginId as computeOriginID
+} from "../sdk/src/checkpoint.js";
+import { verifySig as sigVerify, SIG_ALG_ED25519, sigAlgSigLen as sigLen } from "../sdk/src/verify-sig.js";
+import type { SigAlg } from "../sdk/src/signer.js";
+import { decodePayload, MODE_ONLINE } from "../sdk/src/payload.js";
 
 const PORT = parseInt(process.env.MTA_PORT ?? "3002", 10);
 
@@ -71,8 +72,8 @@ async function verify(payloadBytes: Uint8Array): Promise<VerifyResult> {
   add("Entry index check", true, `entry_index=${p.entryIndex} is not reserved null_entry slot`);
 
   // 3. Trust anchor.
-  const anchor = anchorByOriginID(p.originID);
-  if (!anchor) return fail("Trust anchor lookup", `no trusted anchor for origin_id 0x${p.originID.toString(16).padStart(16,"0")} — load issuer trust-config first`);
+  const anchor = anchorByOriginID(p.originId);
+  if (!anchor) return fail("Trust anchor lookup", `no trusted anchor for origin_id 0x${p.originId.toString(16).padStart(16,"0")} — load issuer trust-config first`);
   add("Trust anchor lookup", true, `found: "${anchor.origin}"`);
   res.origin = anchor.origin;
 
@@ -215,7 +216,7 @@ async function verifyNote(note: string, anchor: TrustAnchor, requiredSize: bigin
     if (!raw || raw.length < 4) continue;
     // Per c2sp.org/signed-note: first 4 bytes are key_hash; rest is the sig.
     const rawSig = raw.slice(4);
-    if (sigVerify(anchor.sigAlg, body, rawSig, anchor.issuerPubKey)) { issuerOK = true; break; }
+    if (sigVerify(anchor.sigAlg as SigAlg, body, rawSig, anchor.issuerPubKey)) { issuerOK = true; break; }
   }
   if (!issuerOK) throw new Error(`issuer signature not found or invalid (sig_alg=${anchor.sigAlg})`);
 

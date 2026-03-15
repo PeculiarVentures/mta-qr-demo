@@ -17,7 +17,8 @@
  */
 
 import { createHash } from "crypto";
-import { Signer, SigAlg, SIG_ALG_ED25519, SIG_ALG_ECDSA_P256, SIG_ALG_ML_DSA_44 } from "../signer.js";
+import { SIG_ALG_ED25519, SIG_ALG_ECDSA_P256, SIG_ALG_ML_DSA_44 } from "../signer.js";
+import type { Signer, SigAlg } from "../signer.js";
 
 export interface GoodKeyConfig {
   /** GoodKey API base URL, e.g. "https://api.goodkey.io" */

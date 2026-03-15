@@ -11,7 +11,8 @@
 
 import { readFileSync } from "fs";
 import { sha256 } from "./hash.js";
-import { SigAlg, SIG_ALG_ED25519, SIG_ALG_ECDSA_P256, SIG_ALG_ML_DSA_44 } from "./signer.js";
+import { SIG_ALG_ED25519, SIG_ALG_ECDSA_P256, SIG_ALG_ML_DSA_44 } from "./signer.js";
+import type { SigAlg } from "./signer.js";
 
 export interface WitnessEntry {
   name: string;

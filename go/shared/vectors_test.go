@@ -10,6 +10,7 @@ import (
 	mtacbor "github.com/mta-qr/demo/shared/cbor"
 	"github.com/mta-qr/demo/shared/checkpoint"
 	"github.com/mta-qr/demo/shared/merkle"
+	"github.com/mta-qr/demo/shared/payload"
 )
 
 // vectorFile is the path to the canonical test vectors JSON, relative to
@@ -294,5 +295,128 @@ func TestEntryHashConstruction(t *testing.T) {
 	gotHelperHex := hex.EncodeToString(entryHash)
 	if gotHelperHex != expected.EntryHashHex {
 		t.Errorf("EntryHash helper mismatch:\ngot  %s\nwant %s", gotHelperHex, expected.EntryHashHex)
+	}
+}
+
+// --- Negative vectors: parser and verifier rejection cases ---
+
+// TestRejectEntryIndexZero verifies that a payload with entry_index=0 is
+// decoded without error (it is structurally valid) but exposes entry_index=0,
+// which verifiers MUST check and reject before any other processing.
+func TestRejectEntryIndexZero(t *testing.T) {
+	vs := loadVectors(t)
+	v := vs["reject-entry-index-zero"]
+
+	var input struct {
+		PayloadHex string `json:"payload_hex"`
+	}
+	if err := json.Unmarshal(v.Input, &input); err != nil {
+		t.Fatalf("parse input: %v", err)
+	}
+
+	b := mustDecodeHex(t, input.PayloadHex)
+	p, err := payload.Decode(b)
+	if err != nil {
+		t.Fatalf("unexpected decode error (entry_index=0 is structurally valid): %v", err)
+	}
+	if p.EntryIndex != 0 {
+		t.Fatalf("expected entry_index=0, got %d — check generator", p.EntryIndex)
+	}
+	// The rejection must happen at the verifier level, not the parser.
+	// Confirm the field is zero so downstream verifier tests can rely on it.
+}
+
+// TestRejectTruncatedPayload verifies that payload.Decode returns an error
+// when the payload is truncated mid-field (last 5 bytes removed).
+func TestRejectTruncatedPayload(t *testing.T) {
+	vs := loadVectors(t)
+	v := vs["reject-truncated-payload"]
+
+	var input struct {
+		PayloadHex string `json:"payload_hex"`
+	}
+	if err := json.Unmarshal(v.Input, &input); err != nil {
+		t.Fatalf("parse input: %v", err)
+	}
+
+	b := mustDecodeHex(t, input.PayloadHex)
+	_, err := payload.Decode(b)
+	if err == nil {
+		t.Error("expected parse error for truncated payload, got nil")
+	}
+}
+
+// TestRejectTamperedTBS verifies that a tampered TBS produces an entry_hash
+// that does not match the inclusion proof, so VerifyInclusion returns an error.
+func TestRejectTamperedTBS(t *testing.T) {
+	vs := loadVectors(t)
+	v := vs["reject-tampered-tbs"]
+
+	var input struct {
+		PayloadHex string `json:"payload_hex"`
+		RootHex    string `json:"root_hex"`
+	}
+	if err := json.Unmarshal(v.Input, &input); err != nil {
+		t.Fatalf("parse input: %v", err)
+	}
+
+	b := mustDecodeHex(t, input.PayloadHex)
+	p, err := payload.Decode(b)
+	if err != nil {
+		t.Fatalf("unexpected decode error: %v", err)
+	}
+
+	root := mustDecodeHex(t, input.RootHex)
+	entryHash := merkle.EntryHash(p.TBS)
+
+	// The flat VerifyInclusion uses the combined proof.
+	// For this 2-entry tree the "inner" and "outer" split is trivial:
+	// there is 1 hash and InnerProofCount covers it all. We test the
+	// proof path using the raw Merkle function.
+	err = merkle.VerifyInclusion(
+		entryHash,
+		int(p.EntryIndex),
+		int(p.TreeSize),
+		p.ProofHashes,
+		root,
+	)
+	if err == nil {
+		t.Error("expected Merkle VerifyInclusion failure for tampered TBS, got nil")
+	}
+}
+
+// TestRejectWrongSigAlg verifies that a payload's sig_alg field can be decoded
+// and compared against a trust config, and that a mismatch is detectable.
+// The actual rejection is enforced by the verifier; this test confirms the
+// field is correctly encoded and decoded.
+func TestRejectWrongSigAlg(t *testing.T) {
+	vs := loadVectors(t)
+	v := vs["reject-wrong-sig-alg"]
+
+	var input struct {
+		PayloadHex  string `json:"payload_hex"`
+		TrustConfig struct {
+			SigAlg int `json:"sig_alg"`
+		} `json:"trust_config"`
+	}
+	if err := json.Unmarshal(v.Input, &input); err != nil {
+		t.Fatalf("parse input: %v", err)
+	}
+
+	b := mustDecodeHex(t, input.PayloadHex)
+	p, err := payload.Decode(b)
+	if err != nil {
+		t.Fatalf("unexpected decode error: %v", err)
+	}
+
+	// Payload claims ECDSA P-256 (4), trust config expects Ed25519 (6).
+	if p.SigAlg == uint8(input.TrustConfig.SigAlg) {
+		t.Fatal("test setup error: payload and trust config have same sig_alg, expected mismatch")
+	}
+	if p.SigAlg != payload.SigAlgECDSAP256 {
+		t.Errorf("expected payload sig_alg=%d (ECDSA P-256), got %d", payload.SigAlgECDSAP256, p.SigAlg)
+	}
+	if input.TrustConfig.SigAlg != int(payload.SigAlgEd25519) {
+		t.Errorf("expected trust config sig_alg=%d (Ed25519), got %d", payload.SigAlgEd25519, input.TrustConfig.SigAlg)
 	}
 }

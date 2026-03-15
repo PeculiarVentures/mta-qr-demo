@@ -3,12 +3,12 @@
   "version": "0.1.0",
   "description": "Reference implementation of MTA-QR: Merkle Tree Assertions for Verifiable QR Codes",
   "scripts": {
-    "test": "npx tsx shared/vectors.test.ts && npx tsx shared/signing.test.ts && npx tsc --noEmit",
-    "test:vectors": "npx tsx shared/vectors.test.ts",
+    "test": "cd sdk && npm test && cd ..",
+    "test:vectors": "npx tsx sdk/src/test/vectors.test.ts",
     "issuer": "npx tsx issuer/main.ts",
     "verifier": "npx tsx verifier/main.ts",
-    "test:signing": "npx tsx shared/signing.test.ts",
-    "test:all": "npx tsx shared/vectors.test.ts && npx tsx shared/signing.test.ts && npx tsc --noEmit",
+    "test:signing": "npx tsx sdk/src/test/signing.test.ts",
+    "test:all": "cd sdk && npm test && cd .. && npx tsc --noEmit",
     "typecheck": "npx tsc --noEmit"
   },
   "keywords": [

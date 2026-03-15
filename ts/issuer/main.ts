@@ -6,21 +6,22 @@ import { createServer, IncomingMessage, ServerResponse } from "http";
 import { randomBytes, createHash } from "crypto";
 import QRCode from "qrcode";
 
-import { encodeNullEntry, encodeDataAssertion, decodeDataAssertion } from "../shared/cbor.js";
-import { entryHash, inclusionProof, computeRoot } from "../shared/merkle.js";
+import { encodeNullTbs as encodeNullEntry, encodeTbs as encodeDataAssertion, decodeTbs as decodeDataAssertion } from "../sdk/src/cbor.js";
+import { entryHash, inclusionProof, computeRoot } from "../sdk/src/merkle.js";
 import {
-  checkpointBody, signCheckpoint, signCosignature,
-  witnessKeyID, originID as computeOriginID, pubKeyFromSeed, generateSeed
-} from "../shared/checkpoint.js";
-import { ed25519FromSeed, ecdsaP256FromScalar, mlDsa44FromSeed, newEd25519, newECDSAP256, newMLDSA44, SIG_ALG_ED25519, SIG_ALG_ECDSA_P256, SIG_ALG_MLDSA44, sigAlgName, Signer } from "../shared/signing.js";
-import { encode as encodePayload, MODE_CACHED, WitnessCosig } from "../shared/payload.js";
+  checkpointBody, signCheckpointBody as signCheckpoint, signCosignature,
+  noteKeyId as witnessKeyID, computeOriginId as computeOriginID, pubKeyFromSeed, generateSeed
+} from "../sdk/src/checkpoint.js";
+import { ed25519FromSeed, ecdsaP256FromScalar, mlDsa44FromSeed, newEd25519, newECDSAP256, newMLDSA44, SIG_ALG_ED25519, SIG_ALG_ECDSA_P256, SIG_ALG_MLDSA44, sigAlgName } from "../sdk/src/signers/local.js";
+import type { LocalSigner } from "../sdk/src/signer.js";
+import { encodePayload, MODE_CACHED, WitnessCosig } from "../sdk/src/payload.js";
 
 const ORIGIN = process.env.MTA_ORIGIN ?? "demo.mta-qr.example/ts-issuer/v1";
 const PORT   = parseInt(process.env.MTA_PORT ?? "3001", 10);
 
 // --- Key material ---
 // Instantiate issuer Signer from MTA_SIG_ALG env (default Ed25519).
-function makeIssuerSigner(): Signer {
+function makeIssuerSigner(): LocalSigner {
   const alg = process.env.MTA_SIG_ALG ?? "";
   if (alg === "ecdsa-p256" || alg === "4") {
     const scalar = new Uint8Array(createHash("sha256").update("ts-issuer-ecdsa-scalar").digest());
@@ -32,17 +33,17 @@ function makeIssuerSigner(): Signer {
   }
   return ed25519FromSeed(generateSeed());
 }
-const issuerSigner: Signer = makeIssuerSigner();
+const issuerSigner: LocalSigner = makeIssuerSigner();
 const issuerPub = issuerSigner.publicKeyBytes();
 // Per c2sp.org/signed-note: key_id = SHA-256(name||0x0A||0x01||pub)[0:4]
 const issuerKeyID = witnessKeyID(issuerSigner.keyName, issuerPub);
 
-interface WitnessKey { name: string; keyID: Uint8Array; pub: Uint8Array; seed: Uint8Array; }
+interface WitnessKey { name: string; keyId: Uint8Array; pub: Uint8Array; seed: Uint8Array; }
 const witnesses: WitnessKey[] = [0, 1].map(i => {
   const seed = generateSeed();
   const pub  = pubKeyFromSeed(seed);
   const name = `ts-witness-${i}`;
-  return { name, keyID: witnessKeyID(name, pub), pub, seed };
+  return { name, keyId: witnessKeyID(name, pub), pub, seed };
 });
 
 const originId = computeOriginID(ORIGIN);
@@ -104,7 +105,7 @@ function publishCheckpoint(): SignedCheckpoint {
   const cosigs: WitnessCosig[] = witnesses.map(w => {
     const sig = signCosignature(body, ts, w.seed);
     const s64 = new Uint8Array(64); s64.set(sig);
-    return { keyID: w.keyID, timestamp: ts, signature: s64 };
+    return { keyId: w.keyId, timestamp: ts, signature: s64 };
   });
   latestCkpt = { treeSize, rootHash: parentRoot, body, issuerSig: isig, cosigs };
   return latestCkpt;
@@ -137,7 +138,7 @@ function buildMode1Payload(entryIdx: number, tbs: Uint8Array): Uint8Array {
   return encodePayload({
     version: 0x01, mode: MODE_CACHED, sigAlg: issuerSigner.sigAlg,
     dualSig: false, selfDescrib: true,
-    originID: originId, treeSize: BigInt(ckpt.treeSize),
+    originId: originId, treeSize: BigInt(ckpt.treeSize),
     entryIndex: BigInt(entryIdx),
     origin: ORIGIN,
     proofHashes:     [...innerProof, ...outerProof],
@@ -204,7 +205,7 @@ const server = createServer(async (req, res) => {
       // Per c2sp.org/signed-note + tlog-cosignature:
       //   4-byte key_hash || 8-byte timestamp || 64-byte Ed25519 sig = 76 bytes
       const payload = new Uint8Array(76);
-      payload.set(w.keyID, 0);
+      payload.set(w.keyId, 0);
       let tsVal = c.timestamp;
       for (let j = 7; j >= 0; j--) { payload[4 + j] = Number(tsVal & BigInt(0xff)); tsVal >>= BigInt(8); }
       payload.set(c.signature, 12);
@@ -227,7 +228,7 @@ const server = createServer(async (req, res) => {
       batch_size:         BATCH_SIZE,
       witnesses: witnesses.map(w => ({
         name:        w.name,
-        key_id_hex:  Buffer.from(w.keyID).toString("hex"),
+        key_id_hex:  Buffer.from(w.keyId).toString("hex"),
         pub_key_hex: Buffer.from(w.pub).toString("hex"),
       })),
     });

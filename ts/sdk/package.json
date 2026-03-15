@@ -1,11 +1,11 @@
 {
   "name": "@peculiarventures/mta-qr-sdk",
   "version": "0.1.0",
-  "description": "MTA-QR SDK — Merkle Tree Assertions for Verifiable QR Codes",
+  "description": "MTA-QR SDK \u2014 Merkle Tree Assertions for Verifiable QR Codes",
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
-    "test": "npx tsx src/test/all.test.ts",
+    "test": "npx tsx src/test/vectors.test.ts && npx tsx src/test/signing.test.ts && npx tsx src/test/all.test.ts",
     "typecheck": "npx tsc --noEmit"
   },
   "license": "Apache-2.0",

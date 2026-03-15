@@ -140,6 +140,81 @@
         "public_key_hex": "07e3ccae024193641e8004af70090845943eefd5679feb13e5d4419a88b3055b6b02ec394eb70fb9764bf46ba6155d44018bd0566dc3dc5ff84a8f03473f8af5a0c17b09e9e4f0b96137ada56d253d2333cbd287084aa5c86a4b68fe66c30648044cc5615ce01981362ffd807c0209299c8c82afb0ab77e1d07eba0a49a88b33096a290f59a4829c9373501c7778c63d2c02b600e0a9ac3a52b934ae09e83acc956abff541b443b7b789e2d4883f9cf61d96978244e5f574edf636395d15d66e97a2e7c08392883fb1bf3602c17b2c97635f10ae510af0b9e2746ac7066127982d3b2f4075f51b923293ca29aaf0fe9c910e420032b5416924b85770cb9ae98e906f1f1b1f564dbd3a1338917721fbcbdda257db4f243ee1cb543b86496e65a5dbed4c159ba410d7235977350d655174f979d2e8fd4205ee4486c06391c9dd50a651e4ad74082f8c106130a81f17dca82c2c82cadee84dd2f246fe2e86c043dee888e55686424f2eaa09a4b406dc6606117a66d41a0cd10945d69afb5e01b89ec23cb68f45cd8936ad0ec54fa9046d463dc1db7c00cb6ff9a29c52e1d01f7664387d48a0e85d7ade5bebc0d93182fbf57bdc95db4b3ba482e446b0a00e6bc06c0768b35d67287af9c7231faf01878a4f6973dcf5362d15c91eab85025980d0859015e04b783dab96f0447f1e8216124bae04732197025bdd7989ef0b605300a5e30dbf6e3b8b2de454619a522df2f9bf568a721696ebea30242079e19e0410e1f3e284953a1f7d610fb623feabd2b79e7cf95640fb0a52aea7e1637ff0c2b3dd45567f12cf4e4bb7e1b24da8989d57888be918a75853fe05daed921581afbb008f27950f13198aca09afbf65816e5c1a741ecff8c535df42e955374ed70f0e658c727035fd72e729a02fed6451fc1d2687449f3d25fef7d7922c3b2b6b63f90c21ca5c42edf460b0138f853c538d9fd1580617120c4ab7818b2c4d7a5fcbf944098f284ab2d537bbb42fa77c4420d01426753c0f37b444f1828499de12f843db9bb4cbc045c60869f65a87cb9b913543700e2d86e77c8fe423c5b495e33b75f6b0a27cbdfaf018a06c22c8fd350d29fd1dc7b33dd2f6cfc84593cef7f4fbadee155b1f989ded020e069b13fd56bfd6c68d1703699e8b738c353b1bc6d40204a23c0cecae5c1a7a7518b37aed9196ac60ee679e24abc758f3910df4bed5c6e2eefc695fe285af51bf2e206df71ab8b9f985f378d6060ecbda685e735a11298aac7c34b314dec5f1ac84c7b1668a17ff5a93d4180448b3adc8d271f85b04a0ade6b64b9d485cdba43a6e85b93396fb95f610138f5b60959a7ef83671229a7fd6df2744bbfc81f5e311acc3003d560f5db2e0b8205478ac07c2a629d2cd8d7d6311fdbc3aaa8ed14ed3b34844c93a7015662cea2d6c410b1d82aa3946a4d07607346eb8327ec997a3c79cdba43153bde20fc6661d1e1e22187a847af6e195409e3a3cf52f95ca2288326d509c8ef83b644a7b47a4a6ae8b1361c63bbd5b82c36a2fb6325de54125af27a2acca6501a33866d7de8cccdda6ea6f9af8b7dcbcc4097429718f72c8f232cc28c5c1e4019db2cbf592645a2a5a99a6b1dab22b945e401e0d697f61d9dc988f7a0d54375d21428d795d75948f0bba3a89504d7d516b71659d4ce0989ebec6037581b537631a9d24a6b627495df2ddc20f59411df820ddd996f478a8b6fab144dd2c43f10cebfbd123c5d126ef1a7189d8472ff08f88709cf2de2574e10560f4519afd3bda9353b30ff019c058e2938d8cf8d92f9b189f3e49d00fa7dd73d8c755ae929abd8be90b16a5217cd99408653aacea7e4375446f",
         "verify_result": true
       }
+    },
+    {
+      "id": "reject-entry-index-zero",
+      "description": "Verifiers MUST reject payloads where entry_index==0 immediately, before consulting the trust config or cache. The null_entry at index 0 is a reserved placeholder and can never be a valid assertion. This payload is otherwise structurally valid Mode 1 with a 2-entry tree.",
+      "input": {
+        "payload_hex": "01190b6b18862f12241400000000000000020000000000000000010196a296d224f285c67bee93c30f8a309157f0daa35dc5b87e410b78630a09cfc7001601a302821a6553f1001a713fb300030104a1616b6176",
+        "trust_config": {
+          "origin": "example.com/negative-vectors/v1",
+          "origin_id_hex": "0b6b18862f122414",
+          "issuer_pub_key_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+          "sig_alg": 6,
+          "witness_quorum": 0,
+          "witnesses": [],
+          "checkpoint_url": "http://localhost/unused",
+          "batch_size": 16
+        }
+      },
+      "expected": {
+        "valid": false,
+        "reject_reason": "entry_index == 0 is reserved for null_entry; MUST reject"
+      }
+    },
+    {
+      "id": "reject-tampered-tbs",
+      "description": "A payload whose TBS has been modified after issuance. The last byte of the TBS is flipped (XOR 0xFF). The entry_hash computed from the tampered TBS does not match the Merkle proof, so the inclusion proof fails. The trust config has witness_quorum=0 so the checkpoint check is bypassed; the failure is purely in the Merkle proof phase.",
+      "input": {
+        "payload_hex": "01190b6b18862f12241400000000000000020000000000000001010196a296d224f285c67bee93c30f8a309157f0daa35dc5b87e410b78630a09cfc7001601a302821a6553f1001a713fb300030104a1616b6189",
+        "root_hex": "3731f2efacf3cda3794ea7c29792880a3b92d244c626949d54884c353b28ae14",
+        "trust_config": {
+          "origin": "example.com/negative-vectors/v1",
+          "origin_id_hex": "0b6b18862f122414",
+          "issuer_pub_key_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+          "sig_alg": 6,
+          "witness_quorum": 0,
+          "witnesses": [],
+          "checkpoint_url": "http://localhost/unused",
+          "batch_size": 16
+        }
+      },
+      "expected": {
+        "valid": false,
+        "reject_reason": "Merkle inclusion proof fails \u2014 entry_hash of tampered TBS does not lead to root"
+      }
+    },
+    {
+      "id": "reject-truncated-payload",
+      "description": "A valid Mode 1 payload with the last 5 bytes removed. The parser MUST detect that the declared TBS length exceeds the remaining buffer and reject with a parse error, not a panic or silent truncation. This tests that all length-field bounds checks are enforced.",
+      "input": {
+        "payload_hex": "01190b6b18862f12241400000000000000020000000000000001010196a296d224f285c67bee93c30f8a309157f0daa35dc5b87e410b78630a09cfc7001601a302821a6553f1001a713fb300030104"
+      },
+      "expected": {
+        "valid": false,
+        "reject_reason": "payload truncated \u2014 declared tbs_len exceeds remaining buffer"
+      }
+    },
+    {
+      "id": "reject-wrong-sig-alg",
+      "description": "A payload claiming sig_alg=4 (ECDSA P-256) but the trust config for this origin specifies sig_alg=6 (Ed25519). Verifiers MUST check that the sig_alg in the payload matches the sig_alg in the trust configuration and reject on mismatch (downgrade attack prevention). The payload is otherwise structurally identical to the valid Mode 1 payload.",
+      "input": {
+        "payload_hex": "01110b6b18862f12241400000000000000020000000000000001010196a296d224f285c67bee93c30f8a309157f0daa35dc5b87e410b78630a09cfc7001601a302821a6553f1001a713fb300030104a1616b6176",
+        "trust_config": {
+          "origin": "example.com/negative-vectors/v1",
+          "origin_id_hex": "0b6b18862f122414",
+          "issuer_pub_key_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+          "sig_alg": 6,
+          "witness_quorum": 0,
+          "witnesses": [],
+          "checkpoint_url": "http://localhost/unused",
+          "batch_size": 16
+        }
+      },
+      "expected": {
+        "valid": false,
+        "reject_reason": "sig_alg mismatch: payload=4 (ECDSA P-256), trust config=6 (Ed25519)"
+      }
     }
   ]
 }

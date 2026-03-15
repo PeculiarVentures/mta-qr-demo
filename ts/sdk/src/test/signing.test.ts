@@ -9,16 +9,20 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import {
-  verify,
+  verifySig as verify,
+  SIG_ALG_ED25519,
+} from "../verify-sig.js";
+import {
   ed25519FromSeed,
   ecdsaP256FromScalar,
-  SIG_ALG_ED25519,
   SIG_ALG_ECDSA_P256,
-} from "./signing.js";
+  signing,
+  js,
+} from "../signers/local.js";
 
 const VECTORS_PATH = join(
   new URL(".", import.meta.url).pathname,
-  "../../test-vectors/vectors.json"
+  "../../../../test-vectors/vectors.json"
 );
 
 interface Vector { id: string; input: Record<string,string|number>; expected: Record<string,string|boolean>; }
@@ -149,7 +153,7 @@ if (failed > 0) process.exit(1);
 
 // ---- ML-DSA-44 ----
 
-import { mlDsa44FromSeed, SIG_ALG_MLDSA44 } from "./signing.js";
+import { mlDsa44FromSeed, SIG_ALG_MLDSA44 } from "../signers/local.js";
 
 test("ML-DSA-44: public key derivation from fixed seed matches canonical vector", () => {
   const v = vs.get("signing-mldsa44")!;
