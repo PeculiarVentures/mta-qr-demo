@@ -5,8 +5,9 @@
   Do NOT serve this file directly. Run build.py to produce index.html.
 
   Dependencies are injected by build.py from browser-demo/deps/:
-    {{NAYUKI_QR}}   → deps/nayuki_qr.js     (Nayuki QR Code generator v1.8.0, MIT)
-    {{NOBLE_PQ}}    → deps/noble_pq.iife.js  (@noble/post-quantum v0.5.4 ml_dsa44, MIT)
+    {{NAYUKI_QR}}   → deps/nayuki_qr.js        (Nayuki QR Code generator v1.8.0, MIT)
+    {{NOBLE_PQ}}    → deps/noble_pq.iife.js    (@noble/post-quantum v0.5.4 ml_dsa44, MIT)
+    {{MTA_QR_SDK}}  → deps/mta_qr_sdk.iife.js  (MTA-QR SDK — CBOR, Merkle, payload codec)
 
   Everything else runs in-page using Web Crypto (Ed25519, SHA-256).
   No backend required. No other CDN dependencies.
@@ -817,31 +818,31 @@
 /* {{NOBLE_PQ}} */
 </script>
 
+<!-- ── MTA-QR SDK browser bundle — injected by build.py ──────────────────── -->
+<script>
+/* {{MTA_QR_SDK}} */
+</script>
+
 <script type="module">
-// ── Library accessors ────────────────────────────────────────────────────
-// Both libraries are injected by build.py as plain <script> tags.
-// These thin wrappers keep the application code unchanged.
+// ── SDK + library accessors ───────────────────────────────────────────────
+// All three deps are injected by build.py as plain <script> tags.
 function loadQrLib()   { return Promise.resolve(window.qrcodegen); }
 function loadMlDsa44() { return Promise.resolve(window.__noble_pq.ml_dsa44); }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// CONSTANTS
-// ═══════════════════════════════════════════════════════════════════════════
+// MTA-QR SDK — CBOR, Merkle, payload codec, byte utilities.
+const {
+  sha256, bytesToHex, hexToBytes, bytesToBase64, bytesToBase64url, base64urlToBytes,
+  concatBytes, writeBE64, readBE64, writeBE16, readBE16,
+  cborEncode, cborDecode,
+  hashLeaf, hashNode, merkleRoot, merkleProof, computeRootFromProof, verifyInclusion,
+  encodePayload, decodePayload,
+  fmtCheckpoint, fmtCosig, initOriginId,
+  MODE_CACHED, MODE_EMBEDDED, MODE_ONLINE,
+  SIG_ALG_ED25519, SIG_ALG_ECDSA_P256, SIG_ALG_ML_DSA_44,
+} = window.__mta_qr;
 
-/**
- * Two-level tiled Merkle tree — Mode 1 (offline embedded proof).
- *
- * Mode 1 uses TWO trees to bound the embedded proof to 8 hashes forever:
- *   Inner (batch) tree: BATCH_SIZE entries → ≤ BATCH_LOG2 inner proof hashes
- *   Outer (parent) tree: one leaf per batch → ≤ BATCH_LOG2 outer proof hashes
- *   Maximum total proof: 8 hashes = 256 bytes, regardless of log size.
- *
- * Mode 2 uses a FLAT tree (tlog-tiles compatible). No proof is embedded;
- * the verifier fetches it from the log server at scan time.
- *
- * See SCALABILITY.md for throughput analysis and production strategies.
- * See ARCHITECTURE.md §Design decisions for the flat-vs-tiled trade-offs.
- */
+// ── Constants ─────────────────────────────────────────────────────────────
+
 const BATCH_SIZE        = 16;  // entries per inner batch (power of 2)
 const BATCH_LOG2        = 4;   // log₂(BATCH_SIZE)
 const OUTER_MAX_BATCHES = 16;  // roll outer tree after this many batches
@@ -874,9 +875,7 @@ const EXPIRY_GRACE_SECONDS = 600; // 10-minute clock-skew grace period
 
 const getOrigin = () => ALGORITHMS[state.algorithm].origin;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// APPLICATION STATE
-// ═══════════════════════════════════════════════════════════════════════════
+// ── Application state ──────────────────────────────────────────────────────
 
 const state = {
   ready:                false,
@@ -896,328 +895,15 @@ const state = {
   lastIssuedPayload:    null,
 };
 
-let activePreset          = 'membership';
-let rotationTimer         = null;
+let activePreset             = 'membership';
+let rotationTimer            = null;
 let rotationSecondsRemaining = 0;
-let rotationRunning       = false;
-let simulateOffline       = false;
+let rotationRunning          = false;
+let simulateOffline          = false;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// BINARY UTILITIES
-// ═══════════════════════════════════════════════════════════════════════════
-
-function concatBytes(...arrays) {
-  const len = arrays.reduce((s, a) => s + a.length, 0);
-  const out = new Uint8Array(len);
-  let off = 0;
-  for (const a of arrays) { out.set(a, off); off += a.length; }
-  return out;
-}
-
-function bytesToBase64(bytes) {
-  let s = '';
-  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-  return btoa(s);
-}
-
-function bytesToBase64url(bytes) {
-  return bytesToBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-}
-
-function base64urlToBytes(b64url) {
-  let b = b64url.replace(/-/g, '+').replace(/_/g, '/');
-  while (b.length % 4) b += '=';
-  const s = atob(b);
-  const out = new Uint8Array(s.length);
-  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
-  return out;
-}
-
-function bytesToHex(bytes) {
-  let h = '';
-  for (let i = 0; i < bytes.length; i++) h += bytes[i].toString(16).padStart(2, '0');
-  return h;
-}
-
-function hexToBytes(hex) {
-  hex = hex.trim().replace(/\s/g, '');
-  if (hex.length % 2) throw new Error('hex: odd length');
-  const out = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < out.length; i++) {
-    const v = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-    if (isNaN(v)) throw new Error(`hex: invalid at ${i * 2}`);
-    out[i] = v;
-  }
-  return out;
-}
-
-function writeBE64(value) {
-  const n = typeof value === 'bigint' ? value : BigInt(Math.trunc(Number(value)));
-  const b = new Uint8Array(8);
-  const v = new DataView(b.buffer);
-  v.setUint32(0, Number((n >> 32n) & 0xFFFFFFFFn), false);
-  v.setUint32(4, Number(n & 0xFFFFFFFFn), false);
-  return b;
-}
-
-function readBE64(bytes, off) {
-  if (off + 8 > bytes.length) throw new Error(`readBE64: overrun at ${off}`);
-  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  return (BigInt(v.getUint32(off, false)) << 32n) | BigInt(v.getUint32(off + 4, false));
-}
-
-function writeBE16(value) {
-  const b = new Uint8Array(2);
-  new DataView(b.buffer).setUint16(0, value, false);
-  return b;
-}
-
-function readBE16(bytes, off) {
-  if (off + 2 > bytes.length) throw new Error(`readBE16: overrun at ${off}`);
-  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(off, false);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// DETERMINISTIC CBOR (RFC 8949 §4.2)
-// ═══════════════════════════════════════════════════════════════════════════
-// Non-canonical CBOR causes silent Merkle proof failures: the verifier
-// recomputes entry_hash from TBS bytes; if the issuer encoded differently
-// the hashes diverge and the proof path doesn't exist in the tree.
-
-function cborUint(v) {
-  if (v < 24)      return new Uint8Array([v]);
-  if (v < 256)     return new Uint8Array([24, v]);
-  if (v < 65536)   return new Uint8Array([25, v >> 8, v & 0xff]);
-  return new Uint8Array([26, (v>>>24)&0xff, (v>>>16)&0xff, (v>>>8)&0xff, v&0xff]);
-}
-
-function cborHeader(mt, v) {
-  const h = new Uint8Array(cborUint(v)); h[0] |= (mt << 5); return h;
-}
-
-function cborEncode(value) {
-  if (typeof value === 'number' && Number.isInteger(value) && value >= 0)
-    return cborHeader(0, value);
-  if (typeof value === 'string') {
-    const e = new TextEncoder().encode(value);
-    return concatBytes(cborHeader(3, e.length), e);
-  }
-  if (Array.isArray(value)) {
-    const parts = [cborHeader(4, value.length)];
-    for (const item of value) parts.push(cborEncode(item));
-    return concatBytes(...parts);
-  }
-  if (value instanceof Map) {
-    const pairs = [];
-    for (const [k, v] of value) pairs.push([cborEncode(k), cborEncode(v)]);
-    pairs.sort((a, b) => {
-      const ml = Math.min(a[0].length, b[0].length);
-      for (let i = 0; i < ml; i++) if (a[0][i] !== b[0][i]) return a[0][i] - b[0][i];
-      return a[0].length - b[0].length;
-    });
-    const parts = [cborHeader(5, pairs.length)];
-    for (const [k, v] of pairs) { parts.push(k); parts.push(v); }
-    return concatBytes(...parts);
-  }
-  throw new Error(`cborEncode: unsupported type '${typeof value}'`);
-}
-
-function cborDecode(bytes, off) {
-  if (off >= bytes.length) throw new Error(`cborDecode: end at ${off}`);
-  const fb = bytes[off++];
-  const mt = fb >> 5;
-  const ai = fb & 0x1f;
-  let arg;
-  if      (ai <= 23) arg = ai;
-  else if (ai === 24) arg = bytes[off++];
-  else if (ai === 25) { arg = (bytes[off] << 8) | bytes[off+1]; off += 2; }
-  else if (ai === 26) { arg = ((bytes[off]<<24)|(bytes[off+1]<<16)|(bytes[off+2]<<8)|bytes[off+3])>>>0; off += 4; }
-  else throw new Error(`cborDecode: bad ai ${ai}`);
-
-  switch (mt) {
-    case 0: return { value: arg, nextOffset: off };
-    case 3: { const t = new TextDecoder().decode(bytes.slice(off, off+arg)); return { value: t, nextOffset: off+arg }; }
-    case 4: {
-      const items = [];
-      for (let i = 0; i < arg; i++) { const r = cborDecode(bytes, off); items.push(r.value); off = r.nextOffset; }
-      return { value: items, nextOffset: off };
-    }
-    case 5: {
-      const map = new Map();
-      for (let i = 0; i < arg; i++) {
-        const kr = cborDecode(bytes, off); off = kr.nextOffset;
-        const vr = cborDecode(bytes, off); off = vr.nextOffset;
-        map.set(kr.value, vr.value);
-      }
-      return { value: map, nextOffset: off };
-    }
-    default: throw new Error(`cborDecode: major type ${mt}`);
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// SHA-256 AND RFC 6962 MERKLE TREE
-// ═══════════════════════════════════════════════════════════════════════════
-
-async function sha256(data) {
-  return new Uint8Array(await crypto.subtle.digest('SHA-256', data));
-}
-
-// RFC 6962 §2.1 leaf hash: SHA-256(0x00 || data)
-async function hashLeaf(data) {
-  return sha256(concatBytes(new Uint8Array([0x00]), data));
-}
-
-// RFC 6962 §2.1 internal node hash: SHA-256(0x01 || left || right)
-async function hashNode(left, right) {
-  return sha256(concatBytes(new Uint8Array([0x01]), left, right));
-}
-
-async function merkleRoot(leaves) {
-  if (!leaves.length) throw new Error('merkleRoot: empty');
-  let cur = [...leaves];
-  while (cur.length > 1) {
-    const nxt = [];
-    for (let i = 0; i + 1 < cur.length; i += 2) nxt.push(await hashNode(cur[i], cur[i+1]));
-    if (cur.length % 2 === 1) nxt.push(cur[cur.length - 1]);
-    cur = nxt;
-  }
-  return cur[0];
-}
-
-async function merkleProof(leaves, idx) {
-  if (leaves.length === 1) return [];
-  const proof = [];
-  let cur = [...leaves], i = idx;
-  while (cur.length > 1) {
-    const sib = i % 2 === 0 ? i + 1 : i - 1;
-    proof.push(sib < cur.length ? cur[sib] : cur[i]);
-    const nxt = [];
-    for (let j = 0; j + 1 < cur.length; j += 2) nxt.push(await hashNode(cur[j], cur[j+1]));
-    if (cur.length % 2 === 1) nxt.push(cur[cur.length - 1]);
-    i = Math.floor(i / 2); cur = nxt;
-  }
-  return proof;
-}
-
-async function computeRootFromProof(start, idx, size, proof) {
-  let node = start, i = idx, sz = size;
-  for (const sib of proof) {
-    if (i % 2 === 0) {
-      if (i + 1 === sz && sz % 2 === 1) { i = Math.floor(i/2); sz = Math.floor((sz+1)/2); continue; }
-      node = await hashNode(node, sib);
-    } else {
-      node = await hashNode(sib, node);
-    }
-    i = Math.floor(i/2); sz = Math.floor((sz+1)/2);
-  }
-  return node;
-}
-
-async function verifyInclusion(leaf, idx, size, proof, expected) {
-  const computed = await computeRootFromProof(leaf, idx, size, proof);
-  return bytesToHex(computed) === bytesToHex(expected);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// CHECKPOINT FORMAT (c2sp.org/tlog-checkpoint)
-// ═══════════════════════════════════════════════════════════════════════════
-
-// NOTE: the trailing \n on the root hash line is authenticated content.
-// Stripping it causes signature verification to fail.
-function fmtCheckpoint(origin, treeSize, rootHash) {
-  return `${origin}\n${treeSize}\n${bytesToBase64(rootHash)}\n`;
-}
-
-function fmtCosig(body, ts) {
-  return `cosignature/v1\ntime ${ts}\n${body}`;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// PAYLOAD ENCODE / DECODE
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// Mode 1 layout:
-//   version(1) flags(1) originId(8) treeSize(8) entryIndex(8)
-//   proofCount(1) innerProofCount(1) proof[proofCount×32]
-//   tbsLen(2) tbs[tbsLen]
-//
-// Wire format (all modes):
-//   version(1) flags(1) originId(8) treeSize(8) entryIndex(8)
-//   proofCount(1) innerProofCount(1) proof[proofCount*32]
-//   tbsLen(2) tbs[tbsLen]
-//
-// Mode 2 always writes proofCount=0 innerProofCount=0 (no proof bytes follow).
-// Go and TypeScript always write these two bytes regardless of mode.
-// Omitting them in Mode 2 creates a binary incompatibility.
-//
-// flags = mode[1:0] | sigAlg[4:2]  (dualSig=bit5, selfDescribing=bit7)
-
-function encodePayload(originId, treeSize, entryIndex, innerProof, outerProof, tbs) {
-  const flags = (ALGORITHMS[state.algorithm].sigAlgId << 2) | state.modeId;
-  const hdr = [
-    new Uint8Array([0x01, flags]),
-    writeBE64(originId),
-    writeBE64(BigInt(treeSize)),
-    writeBE64(BigInt(entryIndex)),
-  ];
-  if (state.modeId === 1) {
-    const all = [...innerProof, ...outerProof];
-    return concatBytes(...hdr, new Uint8Array([all.length, innerProof.length]), ...all, writeBE16(tbs.length), tbs);
-  }
-  // Mode 2: write proof_count=0 inner_proof_count=0 to match Go/TS wire format
-  return concatBytes(...hdr, new Uint8Array([0, 0]), writeBE16(tbs.length), tbs);
-}
-
-function decodePayload(bytes) {
-  if (!(bytes instanceof Uint8Array)) throw new Error(`expected Uint8Array, got ${typeof bytes}`);
-  if (bytes.length < 33) throw new Error(`too short: ${bytes.length}B`); // 26B header + 2B proof counts + 2B tbsLen + 1B tbs min
-  let off = 0;
-
-  const version      = bytes[off++];
-  const flags        = bytes[off++];
-  const mode         = flags & 0x03;
-  const sigAlg       = (flags >> 2) & 0x07;
-  const dualSig      = !!(flags & 0x20);
-  const selfDescribing = !!(flags & 0x80);
-
-  const originId   = readBE64(bytes, off); off += 8;
-  const treeSize   = readBE64(bytes, off); off += 8;
-  const entryIndex = readBE64(bytes, off); off += 8;
-
-  let origin = null;
-  if (selfDescribing) {
-    const ol = readBE16(bytes, off); off += 2;
-    if (off + ol > bytes.length) throw new Error('origin overrun');
-    origin = new TextDecoder().decode(bytes.slice(off, off + ol)); off += ol;
-  }
-
-  // proof_count and inner_proof_count are always present (all modes).
-  // Mode 2 payloads must have both = 0; Mode 1 carries the actual proof.
-  if (off + 2 > bytes.length) throw new Error('missing proofCount/innerProofCount bytes');
-  const proofCount = bytes[off++];
-  let innerProofCount = bytes[off++];
-  if (innerProofCount > proofCount) throw new Error(`innerProofCount(${innerProofCount}) > proofCount(${proofCount})`);
-  if (mode === 2 && proofCount !== 0) throw new Error(`Mode 2 payload must have proofCount=0, got ${proofCount}`);
-
-  let proofHashes = [];
-  if (proofCount > 0) {
-    const pbc = proofCount * 32;
-    if (off + pbc > bytes.length) throw new Error(`proof overrun: need ${pbc}B`);
-    for (let i = 0; i < proofCount; i++) { proofHashes.push(bytes.slice(off, off + 32)); off += 32; }
-  }
-
-  const tbsLen = readBE16(bytes, off); off += 2;
-  if (tbsLen < 1) throw new Error('tbs_len < 1');
-  if (off + tbsLen > bytes.length) throw new Error('tbs overrun');
-  const tbs = bytes.slice(off, off + tbsLen);
-
-  return { version, mode, sigAlg, dualSig, selfDescribing, originId, treeSize, entryIndex, origin, proofHashes, innerProofCount, tbs };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// CRYPTO — ISSUER SIGN / VERIFY
-// ═══════════════════════════════════════════════════════════════════════════
+// ── In-page key operations (Web Crypto — demo only) ───────────────────────
+// These wrap raw Web Crypto key objects for the demo's in-page key material.
+// Production code uses GoodKeySigner which delegates to GoodKey over the API.
 
 async function genIssuerKey() {
   if (state.algorithm === 'ed25519') {
@@ -1246,9 +932,7 @@ async function issuerVerify(sig, msg, pub) {
   return mlDsa44.verify(sig, msg, pub);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// INITIALIZATION
-// ═══════════════════════════════════════════════════════════════════════════
+// ── Initialization ─────────────────────────────────────────────────────────
 
 async function init() {
   document.getElementById('js-init-msg').textContent = `Generating ${ALGORITHMS[state.algorithm].label} keys…`;
@@ -1377,7 +1061,12 @@ async function issueAssertion(schemaId, ttlSeconds, claims) {
     state.flatLog.push({ tbs, entryHash });
     await publishCheckpoint();
     const idx      = state.flatLog.length - 1;
-    const payload  = encodePayload(state.originId, state.flatLog.length, idx, [], [], tbs);
+    const payload  = encodePayload(
+      state.originId, state.flatLog.length, idx, [], [], tbs,
+      ALGORITHMS[state.algorithm].sigAlgId,  // sigAlg
+      undefined,                              // origin — bound payload
+      state.modeId                            // mode (2 = online/flat)
+    );
     return { payloadBytes: payload, base64url: bytesToBase64url(payload), entryIndex: idx, treeSize: state.flatLog.length, expiryTime: expiry, proofCount: 0, innerCount: 0, outerCount: 0, claims, schemaId };
   }
 
@@ -1412,7 +1101,12 @@ async function issueAssertion(schemaId, ttlSeconds, claims) {
   const innerProof = await merkleProof(batchHashes, innerIdx);
   const outerProof = await merkleProof(await buildBatchRoots(), batchIdx);
 
-  const payload = encodePayload(state.originId, totalEntryCount(), globalIdx, innerProof, outerProof, tbs);
+  const payload = encodePayload(
+    state.originId, totalEntryCount(), globalIdx, innerProof, outerProof, tbs,
+    ALGORITHMS[state.algorithm].sigAlgId,    // sigAlg
+    undefined,                               // origin — bound payload
+    state.modeId                             // mode (1 = offline/tiled)
+  );
   return {
     payloadBytes: payload,
     base64url:    bytesToBase64url(payload),

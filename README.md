@@ -1,19 +1,17 @@
 # mta-qr-demo
 
-<!-- CI badge: replace REPO_PATH with your GitHub org/repo before pushing -->
-![CI](https://github.com/mta-qr-demo/actions/workflows/ci.yml/badge.svg)
+[![CI](https://github.com/PeculiarVentures/mta-qr-demo/actions/workflows/ci.yml/badge.svg)](https://github.com/PeculiarVentures/mta-qr-demo/actions/workflows/ci.yml)
 
 Reference implementation of **MTA-QR** — Merkle Tree Assertions for Verifiable QR Codes.
 
 MTA-QR issues cryptographically authenticated QR codes backed by a transparency log. Each QR code carries a Merkle inclusion proof; a verifier checks it against a locally cached checkpoint signed by the issuer and witnessed by an independent quorum — entirely offline after a prefetch.
 
-This repository proves the protocol is implementable by providing two independent implementations (Go and TypeScript) that pass a shared canonical test-vector suite and verify each other's payloads across two signing algorithms.
+This repository provides four independent implementations (Go, TypeScript, Rust, Java) that pass a shared interop matrix across three signing algorithms and two payload modes.
 
 **Documents in this repository:**
 - [`SPEC.md`](SPEC.md) — Protocol specification v0.1
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — Code structure and design decisions
-- [`test-vectors/README.md`](test-vectors/README.md) — Test vector format and how to add new ones
-- [`SETUP.md`](SETUP.md) — Pre-push checklist (Go module path + CI badge)
+- [`test-vectors/README.md`](test-vectors/README.md) — Test vector format
 - [`browser-demo/README.md`](browser-demo/README.md) — In-browser demo usage
 
 ---
@@ -23,242 +21,176 @@ This repository proves the protocol is implementable by providing two independen
 ### Prerequisites
 
 | Tool | Version | Purpose |
-|------|---------|---------|
-| Go | 1.22+ | Go issuer and verifier |
-| Node.js | 20+ | TypeScript issuer and verifier |
+|------|---------|---------| 
+| Go | 1.22+ | Go SDK |
+| Node.js | 20+ | TypeScript SDK |
+| Rust | 1.85+ | Rust SDK |
+| Java | 17+ | Java SDK |
+| Maven | 3.8+ | Java build |
 | Python | 3.10+ | Interop test runner |
-| `tsx` | any | TypeScript runner — installed via `npm install` in `ts/` (dev dependency) |
-
-### Install TypeScript dependencies
-
-```bash
-cd ts && npm install
-```
-
-Or with Make (also installs and runs all tests):
-
-```bash
-make install && make test
-```
 
 ### Run the test suites
 
 ```bash
-# Go: shared library vectors + signing self-tests
-cd go && go test ./...
-
-# TypeScript: vectors, signing self-tests, and type-check
-cd ts && npm run test:all
+cd go   && go test ./...
+cd ts   && npm ci && npm run test:all
+cd rust && cargo test
+cd java && mvn test
 ```
 
-`npm run test:all` runs vector tests, signing tests, and `tsc --noEmit`. All must pass before running services.
-
-### Start services locally
+### Run the interop matrix
 
 ```bash
-# Terminal 1 — Go issuer (Ed25519, port 8081)
-cd go && go run ./issuer/
-
-# Terminal 2 — Go verifier (port 8082)
-cd go && go run ./verifier/
-
-# Terminal 3 — TypeScript issuer (Ed25519, port 3001)
-cd ts && npx tsx issuer/main.ts
-
-# Terminal 4 — TypeScript verifier (port 3002)
-cd ts && npx tsx verifier/main.ts
-```
-
-Open the UIs:
-
-| Service | URL | What it does |
-|---------|-----|--------------|
-| Go issuer | http://localhost:8081 | Issue QR codes with example claims |
-| Go verifier | http://localhost:8082 | Paste a payload, see 15-step verification trace |
-| TS issuer | http://localhost:3001 | Same as Go issuer, different stack |
-| TS verifier | http://localhost:3002 | Same as Go verifier, different stack |
-
-### Run the automated interop matrix
-
-```bash
-python3 interop_test.py
-# or
-make interop
-```
-
-Builds Go binaries, starts all eight services (6 issuers + 2 verifiers), runs the 12-cell positive matrix and 3 negative tests. Exits 0 on 15/15.
-
-### Docker Compose
-
-```bash
-docker compose up --build
+python3 interop_test.py   # or: make interop
 ```
 
 ---
 
 ## Interop matrix
 
-The matrix validates that any issuer payload verifies correctly with any verifier, across three signing algorithms. Positive tests confirm correct acceptance; negative tests confirm correct rejection.
+**96 cells — 4 issuers × 4 verifiers × 3 algorithms × 2 modes. All pass.**
 
-**Positive (12 cells):**
+Each verifier also asserts the `mode` field on the result matches the issued payload mode.
 
-| Issuer | Verifier | Algorithm | Result |
-|--------|----------|-----------|--------|
-| Go | Go | Ed25519 | ✓ |
-| TS | TS | Ed25519 | ✓ |
-| Go | TS | Ed25519 | ✓ |
-| TS | Go | Ed25519 | ✓ |
-| Go | Go | ECDSA P-256 | ✓ |
-| TS | TS | ECDSA P-256 | ✓ |
-| Go | TS | ECDSA P-256 | ✓ |
-| TS | Go | ECDSA P-256 | ✓ |
-| Go | Go | ML-DSA-44 (FIPS 204) | ✓ |
-| TS | TS | ML-DSA-44 (FIPS 204) | ✓ |
-| Go | TS | ML-DSA-44 (FIPS 204) | ✓ |
-| TS | Go | ML-DSA-44 (FIPS 204) | ✓ |
+### Mode 1 — inclusion proof embedded (48 cells)
 
-**Negative (3 cells — must reject):**
+The issuer computes and embeds a two-phase tiled Merkle proof at issuance time. The verifier works fully offline after a one-time checkpoint prefetch.
+
+| Issuer | Algorithm | Go | TS | Rust | Java |
+|--------|-----------|:--:|:--:|:----:|:----:|
+| Go | Ed25519 | ✓ | ✓ | ✓ | ✓ |
+| Go | ECDSA P-256 | ✓ | ✓ | ✓ | ✓ |
+| Go | ML-DSA-44 | ✓ | ✓ | ✓ | ✓ |
+| TS | Ed25519 | ✓ | ✓ | ✓ | ✓ |
+| TS | ECDSA P-256 | ✓ | ✓ | ✓ | ✓ |
+| TS | ML-DSA-44 | ✓ | ✓ | ✓ | ✓ |
+| Rust | Ed25519 | ✓ | ✓ | ✓ | ✓ |
+| Rust | ECDSA P-256 | ✓ | ✓ | ✓ | ✓ |
+| Rust | ML-DSA-44 | ✓ | ✓ | ✓ | ✓ |
+| Java | Ed25519 | ✓ | ✓ | ✓ | ✓ |
+| Java | ECDSA P-256 | ✓ | ✓ | ✓ | ✓ |
+| Java | ML-DSA-44 | ✓ | ✓ | ✓ | ✓ |
+
+### Mode 2 — proof deferred (48 cells)
+
+The issuer emits no proof hashes. In production a scanner fetches proof tiles from a tile server at scan time. The SDK verifier validates everything except inclusion (checkpoint, witnesses, TBS, expiry, `entry_index < tree_size`). See the Mode 2 limitation below.
+
+| Issuer | Algorithm | Go | TS | Rust | Java |
+|--------|-----------|:--:|:--:|:----:|:----:|
+| Go | Ed25519 | ✓ | ✓ | ✓ | ✓ |
+| Go | ECDSA P-256 | ✓ | ✓ | ✓ | ✓ |
+| Go | ML-DSA-44 | ✓ | ✓ | ✓ | ✓ |
+| TS | Ed25519 | ✓ | ✓ | ✓ | ✓ |
+| TS | ECDSA P-256 | ✓ | ✓ | ✓ | ✓ |
+| TS | ML-DSA-44 | ✓ | ✓ | ✓ | ✓ |
+| Rust | Ed25519 | ✓ | ✓ | ✓ | ✓ |
+| Rust | ECDSA P-256 | ✓ | ✓ | ✓ | ✓ |
+| Rust | ML-DSA-44 | ✓ | ✓ | ✓ | ✓ |
+| Java | Ed25519 | ✓ | ✓ | ✓ | ✓ |
+| Java | ECDSA P-256 | ✓ | ✓ | ✓ | ✓ |
+| Java | ML-DSA-44 | ✓ | ✓ | ✓ | ✓ |
+
+### Negative tests (must reject)
 
 | Test | Result |
 |------|--------|
 | Ed25519 payload presented to verifier holding only ECDSA anchor | ✓ rejected |
 | Tampered payload (bit flip in TBS — Merkle proof fails) | ✓ rejected |
 | Payload for origin with no trust config loaded | ✓ rejected |
+| Payload with trailing bytes after TBS | ✓ rejected |
+| Trust config with `witness_quorum=0` | ✓ rejected at parse time |
+| Trust config with `witness_quorum > len(witnesses)` | ✓ rejected at parse time |
 
 ---
 
-## Environment variables
+## Payload modes
 
-All services read configuration from environment variables.
+Set `mode` in `IssuerConfig` (default `1`):
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MTA_PORT` | 8081/8082/3001/3002 | Listening port |
-| `MTA_ORIGIN` | `demo.mta-qr.example/…` | Log origin string. **Must be unique per (key, algorithm) pair.** |
-| `MTA_SIG_ALG` | `""` (Ed25519) | Signing algorithm: `""` or `"ed25519"` for Ed25519; `"ecdsa-p256"` or `"4"` for ECDSA P-256; `"mldsa44"` or `"ml-dsa-44"` or `"1"` for ML-DSA-44 (FIPS 204). |
-| `MTA_BASE_URL` | `""` | Base URL the issuer advertises in `/trust-config` for the `checkpoint_url` field. Required in Docker/remote deployments where `localhost` in the trust config would resolve to the verifier container. Example: `http://go-issuer-ed25519:8081` |
-| `MTA_TRUST_CONFIG_URLS` | `""` | Comma-separated `/trust-config` URLs to auto-load at startup (Docker Compose). |
-
-**Origin uniqueness is required.** Two issuers with different algorithms MUST have different origins. Sharing an origin between algorithm variants causes the verifier's checkpoint cache to return the wrong root, producing a Merkle proof failure with no obvious diagnostic.
-
-### Running ECDSA P-256 and ML-DSA-44 issuers
-
-```bash
-# Go ECDSA P-256
-MTA_SIG_ALG=ecdsa-p256 MTA_PORT=8083 \
-  MTA_ORIGIN=demo.mta-qr.example/go-issuer/ecdsa-p256/v1 \
-  go run ./go/issuer/
-
-# Go ML-DSA-44 (FIPS 204)
-MTA_SIG_ALG=mldsa44 MTA_PORT=8085 \
-  MTA_ORIGIN=demo.mta-qr.example/go-issuer/mldsa44/v1 \
-  go run ./go/issuer/
-
-# TypeScript ECDSA P-256
-MTA_SIG_ALG=ecdsa-p256 MTA_PORT=3003 \
-  MTA_ORIGIN=demo.mta-qr.example/ts-issuer/ecdsa-p256/v1 \
-  npx tsx ts/issuer/main.ts
-
-# TypeScript ML-DSA-44
-MTA_SIG_ALG=mldsa44 MTA_PORT=3005 \
-  MTA_ORIGIN=demo.mta-qr.example/ts-issuer/mldsa44/v1 \
-  npx tsx ts/issuer/main.ts
+```go
+// Go
+issuer.New(issuer.Config{Origin: "...", Mode: 2}, signer)
+```
+```typescript
+// TypeScript
+new Issuer({ origin: "...", schemaId: 1, mode: 2 }, signer)
+```
+```rust
+// Rust
+IssuerConfig { origin: "...".into(), mode: Some(2), ..Default::default() }
+```
+```java
+// Java
+Issuer.builder().origin("...").mode(2).signer(signer).build()
 ```
 
-Verifiers auto-discover the algorithm from the issuer's `/trust-config` endpoint. No verifier configuration change is needed.
+The `VerifyOk`/`VerifyResult` returned by `verify()` includes a `mode` field so callers can distinguish the two cases.
+
+**Mode 2 limitation.** This SDK's verifier does **not** verify Merkle inclusion for Mode 2 payloads. It validates the checkpoint, witness cosignatures, TBS structure, expiry, and `entry_index < tree_size`, but returns a successful result without cryptographic proof that the entry is in the log. Building a complete Mode 2 scanner requires a tile server and tile-fetching logic on top of this library. Use Mode 1 if you need guaranteed inclusion proof at verify time.
 
 ---
 
-## HTTP API
+## Security properties
 
-### Issuer endpoints
+All four implementations enforce the following and they are covered by the test suite.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/` | Web UI |
-| `POST` | `/issue` | Issue an assertion. Body: `{"schema_id": 1, "ttl_seconds": 3600, "claims": {...}}` |
-| `GET` | `/checkpoint` | Current cosigned checkpoint (tlog-checkpoint signed-note format) |
-| `GET` | `/trust-config` | Trust configuration JSON: origin, issuer public key, sig_alg, witness keys, checkpoint URL |
-| `GET` | `/qr.png?payload=<base64url>` | Render payload as QR code PNG |
+**Witness quorum is mandatory.** The trust config parser rejects `witness_quorum < 1` and `witness_quorum > len(witnesses)` at load time. A zero quorum would trivially pass all cosignature checks — this is caught at parse, not at verify time.
 
-### Verifier endpoints
+**Trailing bytes are rejected.** All four implementations check `pos == len(data)` after decoding the payload. A payload with appended garbage cannot pass as valid.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/` | Web UI (accepts `?payload=<base64>` to pre-fill) |
-| `POST` | `/verify` | Verify a payload. Body: `{"payload_hex": "..."}` or `{"payload_b64": "..."}` |
-| `GET` | `/load-trust-config?url=<url>` | Load a trust anchor from an issuer |
-| `GET` | `/anchors` | List loaded trust anchors |
+**Merkle root comparison is constant-time.** `crypto.timingSafeEqual` (TypeScript), `subtle.ConstantTimeCompare` (Go), `subtle::ConstantTimeEq` (Rust), `MessageDigest.isEqual` (Java). All previously used short-circuiting equality.
 
-### Verification result
+**Checkpoint cache is bounded.** Capped at 1000 entries with insertion-order eviction in all four implementations. Payloads with rapidly incrementing `tree_size` values cannot exhaust memory.
 
-```json
-{
-  "valid": true,
-  "entry_index": 1,
-  "tree_size": 2,
-  "origin": "demo.mta-qr.example/go-issuer/ed25519/v1",
-  "mode": 1,
-  "sig_alg": 6,
-  "schema_id": 1,
-  "claims": {"subject": "demo"},
-  "steps": [
-    {"name": "Decode payload",    "ok": true,  "detail": "mode=1 sig_alg=6 ..."},
-    {"name": "Entry index check", "ok": true,  "detail": "entry_index=1 is valid"},
-    {"name": "Checkpoint cache",  "ok": false, "detail": "cache miss · fetching ..."},
-    {"name": "Checkpoint fetch+verify", "ok": true, "detail": "issuer sig ✓ · 2/2 witnesses ✓"},
-    ...
-  ]
-}
-```
+**CBOR encoding is canonical.** All four implementations sort map keys alphabetically before encoding the TBS. Non-canonical encoding produces a different entry hash and fails cross-language verification. This is enforced by the interop matrix — any issuer's payload verifies with any verifier only if the TBS bytes are bit-identical.
+
+**ML-DSA-44 uses FIPS 204.** All four produce identical key pairs from the same 32-byte seed via `ML-DSA.KeyGen_internal(ξ)`. The Java implementation uses BouncyCastle 1.79+ `MLDSAKeyPairGenerator` — BC 1.78.x `DilithiumKeyPairGenerator` implements pre-standardisation Dilithium and produces different keys from the same seed, breaking cross-language verification.
+
+**Test keys are opaque.** Test seeds are 32-byte values generated from `/dev/urandom`, not derived from strings. This prevents the `sha256("test-ed25519")` pattern from being copied into production.
+
+**Mode 2 does not verify inclusion.** Documented in the `Verifier` class docstring and `IssuerConfig.mode` field doc in all four SDKs. The `mode` field on `VerifyOk` lets callers detect and gate on it.
 
 ---
 
-## Repository layout
+## Known limitations and open work
 
-```
-mta-qr-demo/
-├── SPEC.md                    # Protocol specification v0.1
-├── ARCHITECTURE.md            # Code structure and design decisions
-├── README.md                  # This file
-├── test-vectors/
-│   ├── README.md              # Vector format, how to add new ones
-│   └── vectors.json           # Canonical fixtures (7 vectors)
-├── go/
-│   ├── shared/                # merkle, cbor, checkpoint, payload, signing
-│   ├── issuer/                # HTTP server + in-memory log
-│   └── verifier/              # HTTP server + 15-step verification engine
-├── ts/
-│   ├── shared/                # same five modules + signing
-│   ├── issuer/                # HTTP server
-│   └── verifier/              # HTTP server
-├── browser-demo/              # Self-contained in-browser demo (no build, no server)
-├── interop_test.py            # 15-test automated matrix (12 positive + 3 negative)
-├── docker-compose.yml
-└── docker/                    # go.Dockerfile, ts.Dockerfile
-```
+These are genuine gaps that should be addressed before production use. They are tracked here so they are not lost between sessions.
 
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) for a detailed walkthrough of each component.
+**Mode 2 tile server not implemented.** The SDK verifier accepts Mode 2 payloads without verifying Merkle inclusion. A complete Mode 2 deployment requires a tile server serving proof tiles at `GET /tile/{level}/{index}` and a scanner-side tile-fetching verifier that calls it. The protocol for tile format and addressing is not yet defined in `SPEC.md`.
+
+**Revocation not implemented.** The verifier emits a `revocation check` step with a fixed "no revoked ranges (v0.1 open item)" message in all four implementations. The protocol for expressing and distributing revocation sets is not defined.
+
+**Mode 0 (embedded checkpoint) not implemented.** The payload codec defines `mode=0` where the checkpoint and cosignatures are embedded directly in the payload for fully offline verification with no prefetch. The issuer and verifier in all four SDKs handle only modes 1 and 2.
+
+**`key_assertion` (entry_type=0x02) not implemented.** The verifier rejects `entry_type != 0x01`. Key assertions with possession proofs (challenge-response) are defined in the spec but not implemented.
+
+**Origin must be unique per (algorithm, key) pair.** Two issuers sharing an origin with different algorithms will cause the verifier's checkpoint cache to return the wrong root hash. This constraint is documented but not enforced at issuer construction time — the issuer should validate that the origin encodes the algorithm or refuse to start if the origin appears to conflict.
+
+**SPEC.md does not describe Mode 2 tile addressing.** The spec covers the payload binary format and trust config schema but does not define the tile server API, tile addressing scheme, or tile verification algorithm needed to complete a Mode 2 deployment.
+
+**Browser demo SDK bundle is not committed.** `browser-demo/deps/mta_qr_sdk.iife.js` is built by CI from `ts/src/browser-bundle.ts` via esbuild and not checked in. If the CI workflow is not yet wired to the GitHub Pages deployment step, the demo may serve a stale bundle.
 
 ---
 
-## Key facts
+## Key implementation facts
 
-**CBOR:** Go uses `fxamacker/cbor/v2` with `CanonicalEncOptions()`. TypeScript uses `cborg` — `cbor-x` does not produce RFC 8949 §4.2 deterministic encoding for `Map` inputs with integer keys.
+**CBOR.** Go uses `fxamacker/cbor/v2` with `CanonicalEncOptions()`. TypeScript uses `cborg`. Rust uses `ciborium` with an explicit pre-sort before encoding. Java uses `com.upokecenter.cbor` with sorted insertion. All four sort claim map keys alphabetically — required for canonical TBS bytes and cross-language Merkle proof validity.
 
-**Ed25519 in TypeScript:** Node.js built-in `crypto` via PKCS#8/SPKI DER key objects. No external Ed25519 dependency. Requires Node 18+.
+**Ed25519 in TypeScript.** Node.js built-in `crypto`. No external Ed25519 dependency. Requires Node 20+.
 
-**ECDSA P-256 wire format:** Raw r‖s (IEEE P1363), 64 bytes. Not DER. Both note signature lines and `issuer_sig` payload fields use this encoding.
+**ECDSA P-256 wire format.** Raw r‖s (IEEE P1363), 64 bytes. Not DER.
 
-**ML-DSA-44 (FIPS 204, `sig_alg=1`):** Go uses `cloudflare/circl v1.6.3`. TypeScript uses `@noble/post-quantum`. Both produce identical public keys from the same 32-byte seed, confirmed by the `signing-mldsa44` canonical vector. 2420-byte signatures, 1312-byte public keys.
+**ML-DSA-44.** Go uses `cloudflare/circl v1.6.3`. TypeScript uses `@noble/post-quantum`. Rust uses `ml-dsa v0.1.0-rc.7`. Java uses BouncyCastle 1.79+ `pqc.crypto.mldsa`. 2420-byte signatures, 1312-byte public keys.
 
-**Tiled two-level Merkle tree:** The inclusion proof in each payload has two segments: an inner proof (entry → batch root, ≤4 hashes) and an outer proof (batch root → parent tree root, ≤4 hashes). `BATCH_SIZE=16`, `OUTER_MAX_BATCHES=16`. Maximum proof: 8 hashes = 256 bytes, regardless of total log size. The `inner_proof_count` byte in the payload encodes the split point. The checkpoint signs the **parent tree root**, not a flat root over all entries.
+**Tiled two-level Merkle tree.** `BATCH_SIZE=16`. Inner proof: entry → batch root. Outer proof: batch root → parent root. The `inner_proof_count` byte in the payload encodes the split point. Mode 1 payloads embed both; Mode 2 payloads embed neither.
 
-**Note format issuer signature dispatch:** Verifiers identify the issuer's signature line by matching the `issuer_key_name` field from the trust config against the key name prefix in note signature lines — not by byte length. Length-based heuristics break with ML-DSA-44 (2420 bytes vs. 64 bytes for Ed25519/ECDSA-P256).
+**Issuer signature dispatch.** Verifiers match the `issuer_key_name` field from the trust config against note signature lines — not by byte length. Length-based dispatch breaks with ML-DSA-44 (2420-byte signatures vs 64-byte for Ed25519/ECDSA-P256).
 
-**Witnesses always use Ed25519** regardless of issuer `sig_alg`. Per c2sp.org/tlog-cosignature. The demo generates two in-process witness keys per issuer instance for self-cosigning.
+**Witnesses always use Ed25519** regardless of issuer `sig_alg`, per c2sp.org/tlog-cosignature.
 
-**No external witness network.** The demo self-cosigns. Production deployments would submit to the transparency.dev OmniWitness network.
+**Self-describing payloads.** The server-side SDK issuers (Go, TypeScript, Rust, Java) always set the self-describing flag (bit 7 of the flags byte) and embed the origin string in the payload. The browser demo issues bound payloads (no origin embedded) as a deliberate simplification — the trust config is held in-page.
+
+**CBOR claim values.** Claim values may be strings or integers. The Java CBOR decoder handles both — earlier versions called `.AsString()` unconditionally, which failed on integer-valued claims.
 
 ---
 
@@ -271,3 +203,4 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for a detailed walkthrough of each comp
 - [transparency.dev](https://transparency.dev)
 - [RFC 6962 §2.1](https://www.rfc-editor.org/rfc/rfc6962#section-2.1) — Merkle hash tree
 - [RFC 8949 §4.2](https://www.rfc-editor.org/rfc/rfc8949#section-4.2) — CBOR deterministic encoding
+- [FIPS 204](https://csrc.nist.gov/pubs/fips/204/final) — ML-DSA standard
