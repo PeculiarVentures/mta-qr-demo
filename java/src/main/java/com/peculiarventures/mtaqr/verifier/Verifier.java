@@ -306,6 +306,11 @@ public final class Verifier {
         steps.add(new Step("cbor decode", true,
             "schema_id=" + schemaId + " issued=" + issuedAt + " expires=" + expiresAt));
 
+        // Revocation check — not yet implemented.
+        // The spec defines revocation by index range but GET /revoked format
+        // and authentication are not yet defined. Documented stub.
+        steps.add(new Step("revocation check", true, "not implemented — no revocation list defined yet"));
+
         // Expiry
         long now = Instant.now().getEpochSecond();
         if (expiresAt + GRACE < now)
@@ -348,7 +353,8 @@ public final class Verifier {
         // Parse body
         String[] lines = new String(body, StandardCharsets.UTF_8)
             .stripTrailing().split("\n");
-        if (lines.length != 3) throw new RuntimeException("checkpoint body must have 3 lines");
+        // Per c2sp.org/tlog-checkpoint: three mandatory lines plus optional extension lines.
+        if (lines.length < 3) throw new RuntimeException("checkpoint body must have at least 3 lines, got " + lines.length);
         String bodyOrigin = lines[0];
         long treeSize     = Long.parseUnsignedLong(lines[1]);
         byte[] rootHash   = Base64.getDecoder().decode(lines[2]);

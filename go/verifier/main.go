@@ -180,12 +180,14 @@ func loadTrustConfigFromBytes(body []byte) error {
 	if tc.WitnessQuorum > len(witnesses) {
 		return fmt.Errorf("witness_quorum (%d) exceeds witness count (%d)", tc.WitnessQuorum, len(witnesses))
 	}
-	v.AddAnchor(&verify.TrustAnchor{
+	if err := v.AddAnchor(&verify.TrustAnchor{
 		Origin: tc.Origin, OriginID: originIDInt, IssuerPubKey: issuerPubBytes,
 		IssuerKeyName: tc.IssuerKeyName,
 		SigAlg: tc.SigAlg, WitnessQuorum: tc.WitnessQuorum,
 		Witnesses: witnesses, CheckpointURL: tc.CheckpointURL,
-	})
+	}); err != nil {
+		return fmt.Errorf("add anchor: %w", err)
+	}
 	log.Printf("Loaded trust anchor: %s (origin_id=%016x)", tc.Origin, originIDInt)
 	return nil
 }

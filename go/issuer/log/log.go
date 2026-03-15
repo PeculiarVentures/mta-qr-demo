@@ -384,6 +384,7 @@ func (l *Log) TrustConfig() TrustConfig {
 		WitnessQuorum: len(l.witnesses),
 		Witnesses:     witnesses,
 		CheckpointURL: checkpointURL,
+		BatchSize:     BatchSize,
 	}
 }
 
@@ -418,6 +419,7 @@ type TrustConfig struct {
 	WitnessQuorum int             `json:"witness_quorum"`
 	Witnesses     []WitnessConfig `json:"witnesses"`
 	CheckpointURL string          `json:"checkpoint_url"`
+	BatchSize     int             `json:"batch_size"`
 }
 
 // WitnessConfig is a single witness entry.

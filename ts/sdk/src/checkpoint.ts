@@ -136,7 +136,8 @@ export function parseCheckpointBody(body: Uint8Array): {
   const text = new TextDecoder().decode(body);
   if (!text.endsWith("\n")) throw new Error("checkpoint body must end with \\n");
   const lines = text.slice(0, -1).split("\n");
-  if (lines.length !== 3) throw new Error(`checkpoint body must have 3 lines, got ${lines.length}`);
+  // Per c2sp.org/tlog-checkpoint: three mandatory lines plus optional extension lines.
+  if (lines.length < 3) throw new Error(`checkpoint body must have at least 3 lines, got ${lines.length}`);
   const [origin, treeSizeStr, rootHashB64] = lines;
   const treeSize = BigInt(treeSizeStr);
   const rootHash = new Uint8Array(Buffer.from(rootHashB64, "base64"));

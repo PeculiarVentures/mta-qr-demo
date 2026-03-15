@@ -33,11 +33,12 @@ public final class TrustConfig {
     public final int    witnessQuorum;
     public final List<WitnessEntry> witnesses;
     public final String checkpointUrl;
+    public final int    batchSize;
 
     private TrustConfig(
             String origin, long originId, String issuerKeyName,
             byte[] issuerPubKey, int sigAlg, int witnessQuorum,
-            List<WitnessEntry> witnesses, String checkpointUrl) {
+            List<WitnessEntry> witnesses, String checkpointUrl, int batchSize) {
         this.origin        = origin;
         this.originId      = originId;
         this.issuerKeyName = issuerKeyName;
@@ -46,6 +47,7 @@ public final class TrustConfig {
         this.witnessQuorum = witnessQuorum;
         this.witnesses     = List.copyOf(witnesses);
         this.checkpointUrl = checkpointUrl;
+        this.batchSize     = batchSize;
     }
 
     // --- raw JSON shape ---
@@ -64,7 +66,8 @@ public final class TrustConfig {
         @JsonProperty("sig_alg")           int    sigAlg,
         @JsonProperty("witness_quorum")    int    witnessQuorum,
         @JsonProperty("checkpoint_url")    String checkpointUrl,
-        @JsonProperty("witnesses")         List<WitnessJSON> witnesses
+        @JsonProperty("witnesses")         List<WitnessJSON> witnesses,
+        @JsonProperty("batch_size")        Integer batchSize
     ) {}
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -119,10 +122,11 @@ public final class TrustConfig {
                 "trust config: witness_quorum (" + witnessQuorum +
                 ") exceeds witness count (" + witnesses.size() + ")");
 
+        int batchSize = (raw.batchSize() != null) ? raw.batchSize() : 16;
         return new TrustConfig(
             raw.origin(), originId, raw.issuerKeyName(),
             issuerPubKey, raw.sigAlg(), witnessQuorum,
-            witnesses, raw.checkpointUrl()
+            witnesses, raw.checkpointUrl(), batchSize
         );
     }
 }

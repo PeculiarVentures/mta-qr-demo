@@ -181,16 +181,19 @@ public final class Issuer {
             "pub_key_hex", HexFormat.of().formatHex(w.pub())
         )).toList();
         try {
-            return new ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(Map.of(
-                "origin",             origin,
-                "origin_id",          String.format("%016x", originId),
-                "issuer_key_name",    signer.getKeyName(),
-                "issuer_pub_key_hex", HexFormat.of().formatHex(issuerPub),
-                "sig_alg",            signer.getAlg(),
-                "witness_quorum",     witnesses.size(),
-                "checkpoint_url",     checkpointUrl,
-                "witnesses",          wList
-            ));
+            // Map.of supports ≤10 entries; use Map.ofEntries to avoid the limit.
+            return new ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(
+                Map.ofEntries(
+                    Map.entry("origin",             origin),
+                    Map.entry("origin_id",          String.format("%016x", originId)),
+                    Map.entry("issuer_key_name",    signer.getKeyName()),
+                    Map.entry("issuer_pub_key_hex", HexFormat.of().formatHex(issuerPub)),
+                    Map.entry("sig_alg",            signer.getAlg()),
+                    Map.entry("witness_quorum",     witnesses.size()),
+                    Map.entry("checkpoint_url",     checkpointUrl),
+                    Map.entry("batch_size",         batchSize),
+                    Map.entry("witnesses",          wList)
+                ));
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

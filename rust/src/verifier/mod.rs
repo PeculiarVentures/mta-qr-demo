@@ -236,6 +236,11 @@ impl Verifier {
         };
         add!(true, "cbor decode", format!("schema_id={schema_id} issued={issued_at} expires={expires_at}"));
 
+        // 10. Revocation check — not yet implemented.
+        // The spec defines revocation by index range but GET /revoked format
+        // and authentication are not yet defined. Documented stub.
+        add!(true, "revocation check", "not implemented — no revocation list defined yet");
+
         // 11. Expiry
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
@@ -293,7 +298,8 @@ impl Verifier {
         // Parse body
         let body_str = std::str::from_utf8(&body)?;
         let lines: Vec<&str> = body_str.trim_end_matches('\n').splitn(3, '\n').collect();
-        if lines.len() != 3 { return Err(anyhow!("checkpoint body must have 3 lines")); }
+        // Per c2sp.org/tlog-checkpoint: three mandatory lines plus optional extension lines.
+        if lines.len() < 3 { return Err(anyhow!("checkpoint body must have at least 3 lines, got {}", lines.len())); }
         let note_origin  = lines[0];
         let tree_size: u64 = lines[1].parse()?;
         let root_hash    = B64.decode(lines[2])?;

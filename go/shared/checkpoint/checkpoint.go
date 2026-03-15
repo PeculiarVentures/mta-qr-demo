@@ -115,9 +115,11 @@ func ParseBody(body []byte) (origin string, treeSize uint64, rootHash []byte, er
 	if !strings.HasSuffix(s, "\n") {
 		return "", 0, nil, fmt.Errorf("checkpoint: body must end with newline")
 	}
+	// Per c2sp.org/tlog-checkpoint: the body is three mandatory lines followed by
+	// optional extension lines. We parse the first three and ignore any extras.
 	lines := strings.Split(strings.TrimSuffix(s, "\n"), "\n")
-	if len(lines) != 3 {
-		return "", 0, nil, fmt.Errorf("checkpoint: expected 3 lines, got %d", len(lines))
+	if len(lines) < 3 {
+		return "", 0, nil, fmt.Errorf("checkpoint: expected at least 3 lines, got %d", len(lines))
 	}
 	origin = lines[0]
 	treeSize, err = strconv.ParseUint(lines[1], 10, 64)

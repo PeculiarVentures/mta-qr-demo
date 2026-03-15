@@ -166,6 +166,11 @@ async function verify(payloadBytes: Uint8Array): Promise<VerifyResult> {
   res.expiryTime   = entry.times[1];
   res.schemaId     = entry.schemaId;
 
+  // 10. Revocation check.
+  // NOTE: Not implemented. The spec defines revocation by index range but the
+  // GET /revoked format and authentication are not yet defined. Documented stub.
+  add("Revocation check", true, "not implemented — no revocation list defined yet");
+
   // 11. Expiry check (10-minute grace).
   const now = Math.floor(Date.now() / 1000);
   const grace = 600;
@@ -321,7 +326,15 @@ const server = createServer(async (req, res) => {
       sigAlg: tc.sig_alg, witnessQuorum,
       witnesses, checkpointURL: tc.checkpoint_url,
     };
-    anchors.set(oid.toString(16).padStart(16, "0"), anchor);
+    // origin_id collision check: per SPEC, two distinct origins MUST NOT share
+    // the same 8-byte origin_id — it would make routing ambiguous.
+    const oidKey = oid.toString(16).padStart(16, "0");
+    const existing = anchors.get(oidKey);
+    if (existing && existing.origin !== tc.origin) {
+      return json(res, { ok: false,
+        error: `origin_id collision: 0x${oidKey} is shared by "${existing.origin}" and "${tc.origin}"` }, 400);
+    }
+    anchors.set(oidKey, anchor);
     console.log(`Loaded trust anchor: ${tc.origin} (origin_id=${oid.toString(16).padStart(16,"0")})`);
     return json(res, { ok: true, origin: tc.origin, origin_id: oid.toString(16).padStart(16, "0") });
   }
