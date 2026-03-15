@@ -215,17 +215,25 @@ impl Issuer {
             .ok_or_else(|| anyhow!("not initialized"))?;
 
         let mut note = String::from_utf8(ckpt.body.clone())? + "\n";
+        // Per c2sp.org/signed-note: sig payload = 4-byte key_hash || raw_sig
+        let issuer_key_id = witness_key_id(self.signer.key_name(),
+            &state.issuer_pub);
+        let mut issuer_payload = Vec::with_capacity(4 + ckpt.issuer_sig.len());
+        issuer_payload.extend_from_slice(&issuer_key_id);
+        issuer_payload.extend_from_slice(&ckpt.issuer_sig);
         note += &format!("— {} {}\n",
             self.signer.key_name(),
-            B64.encode(&ckpt.issuer_sig));
+            B64.encode(&issuer_payload));
 
         for (i, w) in state.witnesses.iter().enumerate() {
             let (_, ts, sig) = &ckpt.cosigs[i];
-            let key_name = format!("{}+{}", w.name, B64.encode(&w.pub_key));
-            let mut tsig = vec![0u8; 72];
-            tsig[..8].copy_from_slice(&ts.to_be_bytes());
-            tsig[8..].copy_from_slice(sig);
-            note += &format!("— {} {}\n", key_name, B64.encode(&tsig));
+            // Per c2sp.org/signed-note + tlog-cosignature:
+            //   4-byte key_hash || 8-byte timestamp || 64-byte Ed25519 sig = 76 bytes
+            let mut payload = vec![0u8; 76];
+            payload[..4].copy_from_slice(&w.key_id);
+            payload[4..12].copy_from_slice(&ts.to_be_bytes());
+            payload[12..].copy_from_slice(sig);
+            note += &format!("— {} {}\n", w.name, B64.encode(&payload));
         }
         Ok(note)
     }
@@ -442,9 +450,13 @@ pub(crate) fn cosignature_message(body: &[u8], timestamp: u64) -> Vec<u8> {
 }
 
 fn witness_key_id(name: &str, pub_key: &[u8]) -> [u8; 4] {
-    let key_name = format!("{}+{}", name, B64.encode(pub_key));
-    let hash = Sha256::digest(key_name.as_bytes());
-    hash[..4].try_into().unwrap()
+    // Per c2sp.org/signed-note Ed25519:
+    //   key_id = SHA-256(name || 0x0A || 0x01 || raw_pubkey)[0:4]
+    let mut h = Sha256::new();
+    h.update(name.as_bytes());
+    h.update(&[0x0a, 0x01]); // newline + Ed25519 type byte
+    h.update(pub_key);
+    h.finalize()[..4].try_into().unwrap()
 }
 
 // --- CBOR TBS encoding ---

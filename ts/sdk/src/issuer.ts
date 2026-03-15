@@ -15,7 +15,7 @@ import { encodeTbs, encodeNullTbs, DataAssertionEntry, Claims } from "./cbor.js"
 import { entryHash, inclusionProof, computeRoot } from "./merkle.js";
 import {
   checkpointBody, signCheckpointBody, signCosignature,
-  witnessKeyId, computeOriginId, pubKeyFromSeed, generateSeed,
+  noteKeyId, witnessKeyId, computeOriginId, pubKeyFromSeed, generateSeed,
 } from "./checkpoint.js";
 import {
   encodePayload, WitnessCosig, MODE_CACHED, MODE_ONLINE,
@@ -101,6 +101,7 @@ export class Issuer {
   private latestCkpt:    SignedCheckpoint | null = null;
   private sigAlg:        number     = 0;
   private issuerPub:     Uint8Array = new Uint8Array(0);
+  private issuerKeyId:   Uint8Array = new Uint8Array(4);
   private initialized:   boolean    = false;
 
   constructor(config: IssuerConfig, signer: Signer) {
@@ -129,6 +130,8 @@ export class Issuer {
     if (this.initialized) return;
     this.sigAlg    = this.signer.sigAlg;
     this.issuerPub = await this.signer.publicKeyBytes();
+    // Per c2sp.org/signed-note: key_id = SHA-256(name||0x0A||0x01||pub)[0:4]
+    this.issuerKeyId = noteKeyId(this.signer.keyName, this.issuerPub);
     this.appendEntry(encodeNullTbs());
     await this.publishCheckpoint();
     this.initialized = true;
@@ -191,18 +194,21 @@ export class Issuer {
     if (!this.latestCkpt) throw new Error("Issuer: not initialized");
     const ckpt = this.latestCkpt;
     let note = Buffer.from(ckpt.body).toString() + "\n";
-    note += `— ${this.signer.keyName} ${Buffer.from(ckpt.issuerSig).toString("base64")}\n`;
+    // Per c2sp.org/signed-note: base64 payload = 4-byte key_hash || raw_signature
+    const issuerPayload = new Uint8Array(4 + ckpt.issuerSig.length);
+    issuerPayload.set(this.issuerKeyId, 0);
+    issuerPayload.set(ckpt.issuerSig, 4);
+    note += `— ${this.signer.keyName} ${Buffer.from(issuerPayload).toString("base64")}\n`;
     for (let i = 0; i < this.witnesses.length; i++) {
       const w = this.witnesses[i];
       const c = ckpt.cosigs[i];
-      const keyName = `${w.name}+${Buffer.from(w.pub).toString("base64")}`;
-      const tsBuf = new Uint8Array(8);
+      // Per c2sp.org/signed-note: 4-byte key_hash || 8-byte timestamp || 64-byte Ed25519 sig
+      const payload = new Uint8Array(76);
+      payload.set(w.keyId, 0);
       let tsVal = c.timestamp;
-      for (let j = 7; j >= 0; j--) { tsBuf[j] = Number(tsVal & BigInt(0xff)); tsVal >>= BigInt(8); }
-      const tsig = new Uint8Array(72);
-      tsig.set(tsBuf);
-      tsig.set(c.signature, 8);
-      note += `— ${keyName} ${Buffer.from(tsig).toString("base64")}\n`;
+      for (let j = 7; j >= 0; j--) { payload[4 + j] = Number(tsVal & BigInt(0xff)); tsVal >>= BigInt(8); }
+      payload.set(c.signature, 12);
+      note += `— ${w.name} ${Buffer.from(payload).toString("base64")}\n`;
     }
     return note;
   }

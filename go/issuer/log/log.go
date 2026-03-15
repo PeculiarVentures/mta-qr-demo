@@ -15,7 +15,6 @@ package log
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 	"strings"
 	"sync"
@@ -388,11 +387,18 @@ func (l *Log) TrustConfig() TrustConfig {
 	}
 }
 
-// NoteKeyName returns the key name used in the signed note for this issuer.
+// NoteKeyName returns the bare key name used in signed note signature lines.
+// Per c2sp.org/signed-note, the signature line format is:
+//   — <key_name> <base64(4_byte_keyhash || raw_signature)>
+// The key_name is the bare name only (not the full verifier key string).
 func (l *Log) NoteKeyName() string {
-	return fmt.Sprintf("go-issuer-%s+%s",
-		signing.SigAlgName(l.issuer.SigAlg()),
-		base64.StdEncoding.EncodeToString(l.issuer.PublicKeyBytes()))
+	return fmt.Sprintf("go-issuer-%s", signing.SigAlgName(l.issuer.SigAlg()))
+}
+
+// NoteKeyID returns the 4-byte key hash for the issuer key.
+// Per c2sp.org/signed-note Ed25519: SHA-256(name || 0x0A || 0x01 || pubkey)[0:4].
+func (l *Log) NoteKeyID() [4]byte {
+	return checkpoint.KeyID(l.NoteKeyName(), l.issuer.PublicKeyBytes())
 }
 
 func issuerPort() string {

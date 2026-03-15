@@ -69,7 +69,9 @@ public final class LocalSigner implements Signer {
     // --- factory methods ---
 
     private static String buildKeyName(String label, byte[] pubBytes) {
-        return label + "+" + Base64.getEncoder().encodeToString(pubBytes);
+        // Per c2sp.org/signed-note: key name in signature lines is the bare label.
+        // The key hash and public key go in the trust config only.
+        return label;
     }
 
     /** Creates a LocalSigner from a 32-byte Ed25519 seed. */

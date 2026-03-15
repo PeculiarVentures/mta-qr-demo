@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -23,6 +24,13 @@ func envOr(key, def string) string {
 	}
 	return def
 }
+
+// httpClient is used for all outbound requests.
+// The 10-second timeout prevents goroutine leaks from slow or hanging issuers.
+var httpClient = &http.Client{Timeout: 10 * time.Second}
+
+// maxBodyBytes caps response body reads to prevent memory exhaustion.
+const maxBodyBytes = 64 * 1024
 
 var v = verify.New()
 
@@ -54,13 +62,13 @@ func autoLoadAll(urls []string) {
 			continue
 		}
 		for attempt := 0; attempt < 10; attempt++ {
-			resp, err := http.Get(u)
+			resp, err := httpClient.Get(u)
 			if err != nil {
 				log.Printf("trust config %s attempt %d: %v", u, attempt+1, err)
 				time.Sleep(2 * time.Second)
 				continue
 			}
-			body, _ := io.ReadAll(resp.Body)
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 			resp.Body.Close()
 			if err := loadTrustConfigFromBytes(body); err != nil {
 				log.Printf("parse trust config %s: %v", u, err)
@@ -184,7 +192,11 @@ func loadTrustConfigFromBytes(body []byte) error {
 
 // handleLoadTrustConfig fetches and registers a trust config from an issuer.
 func handleLoadTrustConfig(w http.ResponseWriter, r *http.Request) {
-	setCORS(w)
+	// Do NOT set wildcard CORS — this endpoint mutates server state.
+	// Only the same-origin verifier UI should call it. Setting "null" blocks
+	// all cross-origin requests; the browser enforces same-origin by default
+	// when no ACAO header is present, but explicit null is clearer.
+	w.Header().Set("Access-Control-Allow-Origin", "null")
 	if r.Method == http.MethodOptions {
 		return
 	}
@@ -199,13 +211,19 @@ func handleLoadTrustConfig(w http.ResponseWriter, r *http.Request) {
 	if req.URL == "" {
 		req.URL = "http://localhost:8081/trust-config"
 	}
-	resp, err := http.Get(req.URL)
+	// SSRF mitigation: only localhost targets are permitted.
+	parsed, parseErr := url.Parse(req.URL)
+	if parseErr != nil || !isLocalhost(parsed.Hostname()) {
+		http.Error(w, "trust-config URL must target localhost", http.StatusBadRequest)
+		return
+	}
+	resp, err := httpClient.Get(req.URL)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("fetch %s: %v", req.URL, err), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err := loadTrustConfigFromBytes(body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -241,6 +259,10 @@ func handleUI(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, html)
+}
+
+func isLocalhost(host string) bool {
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func setCORS(w http.ResponseWriter) {
@@ -387,12 +409,16 @@ async function refreshAnchors() {
     el.innerHTML = '<div style="font-size:12px;color:#8b949e">No anchors loaded</div>';
     return;
   }
-  el.innerHTML = anchors.map(a =>
-    '<div class="anchor-item">' +
-    '<div class="anchor-origin">'+a.origin+'</div>' +
-    '<div class="anchor-detail">sig_alg='+a.sig_alg+' quorum='+a.witness_quorum+' '+a.checkpoint_url+'</div>' +
-    '</div>'
-  ).join('');
+  el.innerHTML = '';
+  anchors.forEach(a => {
+    const item   = document.createElement('div'); item.className = 'anchor-item';
+    const origin = document.createElement('div'); origin.className = 'anchor-origin';
+    origin.textContent = a.origin;
+    const detail = document.createElement('div'); detail.className = 'anchor-detail';
+    detail.textContent = 'sig_alg=' + a.sig_alg + ' quorum=' + a.witness_quorum + ' ' + a.checkpoint_url;
+    item.appendChild(origin); item.appendChild(detail);
+    el.appendChild(item);
+  });
 }
 
 async function verifyPayload() {
@@ -437,20 +463,30 @@ function renderResult(r) {
 
   if (r.claims && Object.keys(r.claims).length > 0) {
     document.getElementById('claims-section').style.display = 'block';
-    document.getElementById('claims-grid').innerHTML = Object.entries(r.claims).map(([k,v]) =>
-      '<div class="claim-row"><div class="claim-key">'+k+'</div><div class="claim-val">'+v+'</div></div>'
-    ).join('');
+    const grid = document.getElementById('claims-grid');
+    grid.innerHTML = '';
+    Object.entries(r.claims).forEach(([k, v]) => {
+      const row = document.createElement('div'); row.className = 'claim-row';
+      const key = document.createElement('div'); key.className = 'claim-key'; key.textContent = k;
+      const val = document.createElement('div'); val.className = 'claim-val'; val.textContent = v;
+      row.appendChild(key); row.appendChild(val); grid.appendChild(row);
+    });
   } else {
     document.getElementById('claims-section').style.display = 'none';
   }
 
   const stepsList = document.getElementById('steps-list');
-  stepsList.innerHTML = (r.steps || []).map(s =>
-    '<div class="step ' + (s.ok ? 'ok' : 'fail') + '">' +
-    '<div class="step-icon">' + (s.ok ? '✓' : '✗') + '</div>' +
-    '<div><div class="step-name">' + s.name + '</div>' +
-    '<div class="step-detail">' + s.detail + '</div></div></div>'
-  ).join('');
+  stepsList.innerHTML = '';
+  (r.steps || []).forEach(s => {
+    const step  = document.createElement('div'); step.className = 'step ' + (s.ok ? 'ok' : 'fail');
+    const icon  = document.createElement('div'); icon.className = 'step-icon'; icon.textContent = s.ok ? '✓' : '✗';
+    const body  = document.createElement('div');
+    const name  = document.createElement('div'); name.className = 'step-name';  name.textContent = s.name;
+    const dtail = document.createElement('div'); dtail.className = 'step-detail'; dtail.textContent = s.detail;
+    body.appendChild(name); body.appendChild(dtail);
+    step.appendChild(icon); step.appendChild(body);
+    stepsList.appendChild(step);
+  });
 }
 
 function setResultPending() {

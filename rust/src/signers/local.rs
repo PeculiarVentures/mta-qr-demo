@@ -9,8 +9,10 @@ use p256::ecdsa::{SigningKey as P256SigningKey, Signature as P256Sig};
 use sha2::{Sha256, Digest};
 use ml_dsa::{MlDsa44, KeyGen, EncodedSignature, EncodedVerifyingKey};
 
-fn build_key_name(label: &str, pub_bytes: &[u8]) -> String {
-    format!("{}+{}", label, B64.encode(pub_bytes))
+fn build_key_name(label: &str, _pub_bytes: &[u8]) -> String {
+    // Per c2sp.org/signed-note: key name in signature lines is the bare label.
+    // The key hash and public key go in the trust config verifier key string only.
+    label.to_string()
 }
 
 struct LocalEd25519 {

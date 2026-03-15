@@ -207,20 +207,26 @@ async function verifyNote(note: string, anchor: TrustAnchor, requiredSize: bigin
   for (const line of sigLines) {
     if (!line.includes(anchor.issuerKeyName)) continue;
     const raw = lastFieldBase64(line);
-    if (!raw) continue;
-    if (sigVerify(anchor.sigAlg, body, raw, anchor.issuerPubKey)) { issuerOK = true; break; }
+    if (!raw || raw.length < 4) continue;
+    // Per c2sp.org/signed-note: first 4 bytes are key_hash; rest is the sig.
+    const rawSig = raw.slice(4);
+    if (sigVerify(anchor.sigAlg, body, rawSig, anchor.issuerPubKey)) { issuerOK = true; break; }
   }
   if (!issuerOK) throw new Error(`issuer signature not found or invalid (sig_alg=${anchor.sigAlg})`);
 
-  // Verify witness cosignatures (72-byte timestamped_signature).
+  // Verify witness cosignatures.
+  // Per c2sp.org/signed-note + tlog-cosignature:
+  //   4-byte key_hash || 8-byte timestamp || 64-byte Ed25519 sig = 76 bytes total.
   const verifiedWitnesses = new Set<string>();
   for (const line of sigLines) {
     const raw = lastFieldBase64(line);
-    if (!raw || raw.length < 72) continue;
-    const tsBuf = raw.slice(0, 8);
+    if (!raw || raw.length !== 76) continue;
+    const keyHash = raw.slice(0, 4);
+    const tsBuf  = raw.slice(4, 12);
     const ts = tsBuf.reduce((acc, b, i) => acc | (BigInt(b) << BigInt((7 - i) * 8)), BigInt(0));
-    const sig = raw.slice(8, 72);
+    const sig = raw.slice(12, 76);
     for (const w of anchor.witnesses) {
+      if (!keyHash.every((b, i) => b === w.keyID[i])) continue;
       // Witnesses always use Ed25519 per c2sp.org/tlog-cosignature
       if (sigVerify(SIG_ALG_ED25519, cosignatureV1Message(body, ts), sig, w.pubKey)) verifiedWitnesses.add(w.name);
     }

@@ -336,29 +336,43 @@ encoding matters for signature verification).
 <tree_size decimal>
 <root_hash_base64>
 
-— <issuer_key_name> <base64_issuer_signature>
-— <witness_key_name_1> <cosignature_v1_1>
-— <witness_key_name_2> <cosignature_v1_2>
+— <issuer_key_name> <base64(4_byte_key_hash || issuer_signature)>
+— <witness_name_1> <base64(4_byte_key_hash || 8_byte_timestamp || 64_byte_ed25519_sig)>
+— <witness_name_2> <base64(4_byte_key_hash || 8_byte_timestamp || 64_byte_ed25519_sig)>
 ```
 
 The blank line between body and signatures is the note separator. Signature
 lines begin with `— ` (em dash, space).
 
-**The issuer note signature** is computed over the checkpoint body only — the
-three-line body including its trailing `\n`. When verifying an issuer signature
-on a checkpoint note, the verifier MUST determine the signing algorithm from its
-trust configuration for the origin identified by `origin_id` — not by inspecting
-the key name format in the signature line, not by measuring the signature byte
-length, and not by attempting multiple algorithms. A note parser that iterates
-over signature lines and attempts verification with each algorithm in turn
-violates this requirement and is vulnerable to algorithm substitution attacks.
+**Signed-note signature line format.** Per c2sp.org/signed-note, each signature
+line carries: the key's bare human name (no key hash or public key embedded in
+the line itself), a space, and a base64-encoded payload whose first 4 bytes are
+the key hash (a routing hint identifying which trusted key produced this
+signature) followed by the raw signature bytes.
 
-The key name in the signature line identifies the issuer key using the
-signed-note verifier key name format: `<human_name>+<hex_keyid>+<base64_pubkey>`,
-where `hex_keyid` is the first 4 bytes of SHA-256 of the full key name string,
-hex-encoded. For Ed25519 this is fully specified. For ECDSA P-256 the
-`base64_pubkey` component encodes the uncompressed 65-byte public key. For
-FN-DSA the key name format requires C2SP registration — see Open Questions.
+**Key hash derivation (Ed25519).** Per c2sp.org/signed-note:
+```
+key_hash = SHA-256(key_name || 0x0A || 0x01 || raw_ed25519_pubkey)[0:4]
+```
+where `0x0A` is a newline byte and `0x01` is the Ed25519 signature type
+identifier byte. The key hash is 4 bytes of a routing hint, not a
+cryptographically strong identifier.
+
+**The issuer note signature** is computed over the checkpoint body only — the
+three-line body including its trailing `\n`. The base64 payload in the issuer
+signature line is `key_hash(4) || raw_issuer_sig(N)` where N depends on
+`sig_alg` (64 for Ed25519/ECDSA P-256, 2420 for ML-DSA-44).
+
+When verifying an issuer signature, the verifier MUST determine the signing
+algorithm from its trust configuration for the origin identified by `origin_id`
+— not by inspecting the key name, not by measuring the signature byte length,
+and not by attempting multiple algorithms. The verifier locates the issuer
+signature line by matching the bare issuer key name from the trust config as a
+substring of the line, decodes the base64 payload, discards the first 4 bytes
+(key hash), and verifies the remaining bytes as the raw signature.
+
+For ECDSA P-256 and FN-DSA, the key hash derivation and key name registration
+require C2SP registration — see Open Questions.
 
 ### Witness Cosignatures
 
@@ -374,8 +388,10 @@ time <unix_timestamp_decimal>\n
 where `<checkpoint body>` is the exact three-line body including its trailing
 `\n`. The timestamp is a decimal Unix timestamp in seconds.
 
-Each cosignature is a 72-byte `timestamped_signature`: 8-byte big-endian Unix
-timestamp followed by 64-byte Ed25519 signature over the message above.
+Each cosignature in a checkpoint note signature line is a 76-byte payload:
+4-byte key hash (per the signed-note format), 8-byte big-endian Unix timestamp,
+and 64-byte Ed25519 signature over the cosignature/v1 message. In the Mode 0
+binary `WitnessCosig` struct the same three fields appear in the same order.
 **Witness cosignatures MUST use Ed25519 regardless of the issuer's `sig_alg`.**
 Witness keys are independent of the issuer key; they do not inherit the issuer's
 algorithm. This follows c2sp.org/tlog-cosignature, which specifies Ed25519 as
@@ -494,12 +510,15 @@ big-endian uint64. It is a routing hint only — verifiers use it to select the
 correct trust anchor and cached checkpoint before parsing the TBS. The full
 origin string in the cosigned checkpoint is the authoritative identifier.
 
-**WitnessCosig key_id derivation.** The 4-byte `key_id` is derived from the
-note verifier key name string in the form `<human_name>+<base64_pubkey>` (without
-any keyid component): compute SHA-256 of that string, take the first 4 bytes.
-This is not hex-encoded in the struct — it is the raw 4 bytes. Verifiers map
-the 4-byte `key_id` back to a full witness public key via their trust
-configuration. Collisions in the 4-byte `key_id` space within a single
+**WitnessCosig key_id derivation.** The 4-byte `key_id` uses the same formula
+as the signed-note key hash for Ed25519 keys:
+```
+key_id = SHA-256(key_name || 0x0A || 0x01 || raw_ed25519_pubkey)[0:4]
+```
+where `0x0A` is a newline byte and `0x01` is the Ed25519 signature type
+identifier byte. This is not hex-encoded in the struct — it is the raw 4 bytes.
+Verifiers map the 4-byte `key_id` back to a full witness public key via their
+trust configuration. Collisions in the 4-byte `key_id` space within a single
 verifier's trust configuration MUST be rejected. Total: 76 bytes per witness.
 
 **Parser safety — length field bounds.** Parsers MUST verify that each declared

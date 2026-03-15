@@ -105,11 +105,20 @@ export function verifyCosignature(
   } catch { return false; }
 }
 
-/** Derive the 4-byte witness key ID: SHA-256("<name>+<base64(pubkey)>")[0:4] */
-export function witnessKeyId(name: string, pubKey: Uint8Array): Uint8Array {
-  const keyName = `${name}+${Buffer.from(pubKey).toString("base64")}`;
-  return new Uint8Array(createHash("sha256").update(keyName).digest().subarray(0, 4));
+/**
+ * Derive the 4-byte key ID per c2sp.org/signed-note:
+ *   key_id = SHA-256(name || 0x0A || 0x01 || raw_pubkey)[0:4]
+ * where 0x0A is newline and 0x01 is the Ed25519 signature type identifier byte.
+ */
+export function noteKeyId(name: string, pubKey: Uint8Array): Uint8Array {
+  const h = createHash("sha256");
+  h.update(Buffer.from(name, "utf8"));
+  h.update(Buffer.from([0x0a, 0x01]));
+  h.update(Buffer.from(pubKey));
+  return new Uint8Array(h.digest().subarray(0, 4));
 }
+
+export { noteKeyId as witnessKeyId };
 
 /** Compute origin_id: first 8 bytes of SHA-256(origin) as big-endian uint64. */
 export function computeOriginId(origin: string): bigint {

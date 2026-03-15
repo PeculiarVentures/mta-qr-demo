@@ -366,8 +366,10 @@ public final class Verifier {
         for (String line : sigLines) {
             if (!line.contains(trust.issuerKeyName)) continue;
             byte[] raw = lastFieldBase64(line);
-            if (raw == null) continue;
-            if (SignatureVerifier.verify(trust.sigAlg, body, raw, trust.issuerPubKey)) {
+            if (raw == null || raw.length < 4) continue;
+            // Per c2sp.org/signed-note: first 4 bytes are key_hash; rest is the sig.
+            byte[] rawSig = Arrays.copyOfRange(raw, 4, raw.length);
+            if (SignatureVerifier.verify(trust.sigAlg, body, rawSig, trust.issuerPubKey)) {
                 issuerOk = true;
                 break;
             }
@@ -378,11 +380,15 @@ public final class Verifier {
         Set<String> verified = new HashSet<>();
         for (String line : sigLines) {
             byte[] raw = lastFieldBase64(line);
-            if (raw == null || raw.length != 72) continue;
-            long ts = ByteBuffer.wrap(raw, 0, 8).getLong();
-            byte[] wsig = Arrays.copyOfRange(raw, 8, 72);
+            // Per c2sp.org/signed-note + tlog-cosignature:
+            //   4-byte key_hash || 8-byte timestamp || 64-byte Ed25519 sig = 76 bytes
+            if (raw == null || raw.length != 76) continue;
+            byte[] keyHash = Arrays.copyOfRange(raw, 0, 4);
+            long ts = ByteBuffer.wrap(raw, 4, 8).getLong();
+            byte[] wsig = Arrays.copyOfRange(raw, 12, 76);
             byte[] msg  = Issuer.cosignatureMessage(body, ts);
             for (TrustConfig.WitnessEntry w : trust.witnesses) {
+                if (!Arrays.equals(keyHash, w.keyId())) continue;
                 if (SignatureVerifier.verify(Signer.ALG_ED25519, msg, wsig, w.pubKey()))
                     verified.add(w.name());
             }

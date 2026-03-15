@@ -24,8 +24,10 @@ const ECDSA_P256_PKCS8_PREFIX = Buffer.from(
   "3041020100301306072a8648ce3d020106082a8648ce3d030107042730250201010420", "hex"
 );
 
-function buildKeyName(algLabel: string, pubBytes: Uint8Array): string {
-  return `${algLabel}+${Buffer.from(pubBytes).toString("base64")}`;
+function buildKeyName(algLabel: string, _pubBytes: Uint8Array): string {
+  // Per c2sp.org/signed-note: the key name in a signature line is the bare name.
+  // The key hash and public key go in the trust config verifier key string, not here.
+  return algLabel;
 }
 
 function derToRaw(der: Buffer): Uint8Array {

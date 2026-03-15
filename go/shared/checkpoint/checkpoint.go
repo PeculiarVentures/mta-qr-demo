@@ -48,15 +48,20 @@ func Verify(body []byte, sig []byte, key ed25519.PublicKey) error {
 	return nil
 }
 
-// KeyID derives the 4-byte key ID from an Ed25519 public key.
-// Per the signed-note spec, the key name is "<human_name>+<base64_pubkey>".
-// The key ID is SHA-256(key_name_without_keyid)[0:4].
-// The key_id in WitnessCosig is those 4 bytes before hex-encoding.
+// KeyID derives the 4-byte key ID for an Ed25519 signing key.
+// Per c2sp.org/signed-note:
+//
+//	key_id = SHA-256(key_name || 0x0A || 0x01 || raw_ed25519_pubkey)[0:4]
+//
+// where 0x0A is a newline and 0x01 is the Ed25519 signature type identifier byte.
 func KeyID(humanName string, pubKey ed25519.PublicKey) [4]byte {
-	keyName := humanName + "+" + base64.StdEncoding.EncodeToString(pubKey)
-	h := sha256.Sum256([]byte(keyName))
+	h := sha256.New()
+	h.Write([]byte(humanName))
+	h.Write([]byte{0x0A, 0x01}) // newline + Ed25519 type byte
+	h.Write(pubKey)
+	sum := h.Sum(nil)
 	var id [4]byte
-	copy(id[:], h[:4])
+	copy(id[:], sum[:4])
 	return id
 }
 
