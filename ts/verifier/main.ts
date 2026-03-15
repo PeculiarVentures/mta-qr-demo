@@ -226,7 +226,7 @@ async function verifyNote(note: string, anchor: TrustAnchor, requiredSize: bigin
     const ts = tsBuf.reduce((acc, b, i) => acc | (BigInt(b) << BigInt((7 - i) * 8)), BigInt(0));
     const sig = raw.slice(12, 76);
     for (const w of anchor.witnesses) {
-      if (!keyHash.every((b, i) => b === w.keyId[i])) continue;
+      if (!keyHash.every((b, i) => b === w.keyID[i])) continue;
       // Witnesses always use Ed25519 per c2sp.org/tlog-cosignature
       if (sigVerify(SIG_ALG_ED25519, cosignatureV1Message(body, ts), sig, w.pubKey)) verifiedWitnesses.add(w.name);
     }
