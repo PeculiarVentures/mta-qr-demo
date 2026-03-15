@@ -11,6 +11,8 @@ This repository provides four independent implementations (Go, TypeScript, Rust,
 **Documents in this repository:**
 - [`SPEC.md`](SPEC.md) — Protocol specification v0.1
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — Code structure and design decisions
+- [`COMPARISON.md`](COMPARISON.md) — Comparison with HMAC, per-assertion signatures, and rotating barcodes
+- [`IMPLEMENTERS_GUIDE.md`](IMPLEMENTERS_GUIDE.md) — Practical implementation guide
 - [`test-vectors/README.md`](test-vectors/README.md) — Test vector format
 - [`browser-demo/README.md`](browser-demo/README.md) — In-browser demo usage
 
@@ -181,6 +183,14 @@ Issuer.builder().origin("...").mode(2).signer(signer).build()
 The `VerifyOk`/`VerifyResult` returned by `verify()` includes a `mode` field so callers can distinguish the two cases.
 
 **Mode 2 tile fetching not implemented.** This SDK's verifier does **not** fetch or verify the inclusion proof for Mode 2 payloads. It validates the checkpoint, witness cosignatures, TBS structure, expiry, and `entry_index < tree_size`, then returns a result marked `mode=2`. The inclusion proof is cryptographically verifiable — when a complete Mode 2 scanner fetches the proof and checks it against the witnessed root, the security properties are identical to Mode 1. Building that scanner requires a tile-fetching implementation and a defined tile server API, neither of which exists yet. Use Mode 1 when you need inclusion proof verification today.
+
+---
+
+## Comparison with other approaches
+
+Four QR authentication approaches have seen real deployment at scale: HMAC (shared-secret MAC), per-assertion signatures (EU Digital COVID Certificate model), rotating barcodes (Ticketmaster SafeTix model), and MTA-QR. The approaches differ on PQC migration path, offline capability, credential lifetime, revocation, and whether verifier independence is architecturally supported.
+
+The full analysis is in [`COMPARISON.md`](COMPARISON.md), including a property matrix and guidance on which approach fits which deployment context.
 
 ---
 
