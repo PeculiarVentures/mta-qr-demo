@@ -188,16 +188,21 @@ An assertion is valid if:
 That's the entire verification algorithm. Nothing else is required.
 
 The witness quorum provides transparency: it ensures the issuer cannot present
-a different view of the log to different verifiers. Once a checkpoint has been
-cosigned by witnesses, the issuer cannot retroactively claim that checkpoint
-covered a different set of entries — doing so would require producing a new
-root hash for the same tree_size, which witnesses would reject as an
-inconsistency. Witnesses do not, however, control what the issuer chooses to
-log, prevent entries from expiring, or guarantee that a verifier's checkpoint
-cache is current. The transparency guarantee is specifically that the log is
-append-only and fork-free as seen by the witness network — and only to the
-degree that witnesses are checking consistency before signing, which is what
-the c2sp.org/tlog-witness protocol is designed to enforce.
+a different view of the log to different verifiers. A cosignature is a
+cryptographic statement by the witness that it verified the new checkpoint is
+consistent with all previous checkpoints it has seen for that log — that the
+log is append-only from the witness's perspective. This is not a behavioral
+assumption; it is what the c2sp.org/tlog-witness protocol enforces. The witness
+verifies the consistency proof before cosigning, and the cosignature itself is
+the proof that verification occurred. A verifier holding a checkpoint with a
+valid quorum of witness cosignatures has everything it needs to verify
+cryptographically offline — it does not need to contact witnesses at scan time
+or trust that they will continue to behave.
+
+Witnesses do not, however, control what the issuer chooses to log, prevent
+entries from expiring, or guarantee that a verifier's checkpoint cache is
+current. The transparency guarantee is specifically that the log is append-only
+and fork-free as attested by the witness cosignatures.
 
 Witnesses do not grant the issuer authority. They police the issuer's behavior
 against the log they operate. Authority comes entirely from the reader's trust
@@ -1363,11 +1368,10 @@ protocol spec.
 **PQ witness cosignatures.** The tlog-cosignature/v1 spec mandates Ed25519 for
 witness keys. A future v2 will need PQ witness key types. Ed25519 witnesses are
 adequate for the transparency function in the near term — compromising the
-transparency guarantee requires either compromising multiple independent witness
-operators simultaneously, or suborning witnesses into signing without checking
-consistency. Both are harder attacks than the offline key-breaking scenario
-that motivates PQC today. The strength of the guarantee therefore depends on
-the integrity of the witness operators chosen, not only their key strength.
+transparency guarantee requires compromising multiple independent witness
+operators simultaneously, which is a much harder attack than breaking a single
+issuer key. Witnesses verify consistency before cosigning as a protocol
+requirement, not a behavioral assumption.
 
 ---
 
