@@ -16,7 +16,7 @@ The repository contains two layers: HTTP services (Go and TypeScript) for runnin
                                │
               ┌────────────────┴────────────────┐
               │                                 │
-         go/shared/                         ts/shared/
+         go/shared/                       ts/sdk/src/
     merkle, cbor, checkpoint,          merkle, cbor, checkpoint,
     payload, signing                   payload, signing
               │                                 │
@@ -49,7 +49,7 @@ The TypeScript SDK (`ts/sdk/`) also provides a browser bundle entry point (`src/
 
 ## Protocol layer
 
-The Go HTTP service uses `go/shared/`. The TypeScript HTTP service uses `ts/shared/`. The SDK libraries (`ts/sdk/`, `rust/`, `java/`) each contain equivalent implementations inline without a shared/ dependency. All implementations are independently derived and verified against the same canonical test vectors in `test-vectors/vectors.json`.
+The Go HTTP service uses `go/shared/`. The TypeScript HTTP service imports directly from `ts/sdk/src/` — `ts/shared/` was removed when the duplication was eliminated. The Rust and Java SDK libraries contain equivalent implementations inline. All four implementations are independently verified against the same canonical test vectors in `test-vectors/vectors.json`.
 
 The subsections below describe the shared Go/TypeScript implementation. The SDK implementations follow the same structure and algorithms — see the source files in each SDK directory for language-specific details.
 
@@ -219,7 +219,7 @@ The signed note format is:
 
 The parser splits on `\n\n`, then for each signature line extracts the last space-delimited field as the base64 signature. The algorithm for the issuer signature comes from the trust config — never inferred from signature length.
 
-Cosignature lines carry 72-byte base64: 8-byte big-endian timestamp + 64-byte Ed25519 signature. The parser identifies these by length (72 bytes raw vs 64 bytes raw for a plain Ed25519 signature).
+Cosignature lines carry 76-byte base64 payloads: 4-byte key hash + 8-byte big-endian timestamp + 64-byte Ed25519 signature. The parser identifies witness cosignature lines by matching the 4-byte key hash prefix against known witness key IDs from the trust config, not by byte length alone.
 
 ### Web UI
 
@@ -235,9 +235,9 @@ Same single-page HTML pattern. Left panel: trust anchor loading + payload paste 
 
 ### Canonical test vectors (`test-vectors/vectors.json`)
 
-7 vectors covering: checkpoint body format, null_entry hash, DataAssertionLogEntry CBOR, four-entry Merkle tree (leaf hashes, internal nodes, root, inclusion proof), entry hash construction, Ed25519 signing, ECDSA P-256 signing.
+12 vectors covering: checkpoint body format, null_entry hash, DataAssertionLogEntry CBOR, four-entry Merkle tree (leaf hashes, internal nodes, root, inclusion proof), entry hash construction, Ed25519 signing, ECDSA P-256 signing, ML-DSA-44 signing, and four rejection cases (entry_index=0, tampered TBS, truncated payload, wrong sig_alg).
 
-Both test suites load from this file and assert exact byte output. A vector failure isolates a specific layer disagreement — it's much easier to diagnose than an end-to-end interop failure.
+All four test suites (Go, TypeScript, Rust, Java) load from this file and assert exact byte output. A vector failure isolates a specific layer disagreement — it's much easier to diagnose than an end-to-end interop failure.
 
 See [`test-vectors/README.md`](test-vectors/README.md) for the format and how to add vectors.
 
@@ -305,11 +305,10 @@ These are the only available FIPS 204 implementations for their respective platf
    - Add the `sig_alg` constant to `signing.go`
    - Add a `case` in `Verify()`, `SigLen()`, `PubKeyLen()`, and `SigAlgName()`
 
-3. **Implement in the TypeScript HTTP service** (`ts/shared/signing.ts`):
-   - Add a `SIG_ALG_*` constant
-   - Add factory functions (`<alg>FromSeed(...)`, `new<Alg>()`) implementing `Signer`
-   - Include a `keyName` field in the returned `Signer` — this is how verifiers identify the issuer's signature line in note format
-   - Add a `case` in `verify()`, `sigLen()`, and `sigAlgName()`
+3. **Implement in the TypeScript SDK** (`ts/sdk/src/signers/local.ts` and `ts/sdk/src/verify-sig.ts`):
+   - Add a `SIG_ALG_*` constant to `ts/sdk/src/signer.ts`
+   - Add factory functions to `local.ts` returning `LocalSigner` with sync `sign()` and `publicKeyBytes()`
+   - Add a `case` in `verifySig()` in `verify-sig.ts` and `sigAlgSigLen()`
 
 4. **Implement in the TypeScript SDK** (`ts/sdk/src/signers/local.ts`, `ts/sdk/src/verify-sig.ts`):
    - Add a `local<Alg>()` factory function in `local.ts`
@@ -342,7 +341,7 @@ These are the only available FIPS 204 implementations for their respective platf
 
 2. **Add CBOR struct** in `go/shared/cbor/cbor.go` and encoding function.
 
-3. **Add TypeScript equivalents** in `ts/shared/cbor.ts`.
+3. **Add TypeScript equivalents** in `ts/sdk/src/cbor.ts`.
 
 4. **Add to the issuer's `/issue` handler** to accept and encode the new type.
 
