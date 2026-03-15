@@ -220,6 +220,7 @@ const server = createServer(async (req, res) => {
       sig_alg:            issuerSigner.sigAlg,
       witness_quorum:     witnesses.length,
       checkpoint_url:     `${baseURL}/checkpoint`,
+      batch_size:         BATCH_SIZE,
       witnesses: witnesses.map(w => ({
         name:        w.name,
         key_id_hex:  Buffer.from(w.keyID).toString("hex"),

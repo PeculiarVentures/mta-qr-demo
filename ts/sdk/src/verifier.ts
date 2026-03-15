@@ -235,6 +235,11 @@ export class Verifier {
     catch (e) { return fail("cbor decode", `${e}`); }
     add("cbor decode", true, `schema_id=${entry.schemaId} issued=${entry.times[0]} expires=${entry.times[1]}`);
 
+    // 10. Revocation check — not yet implemented.
+    // The spec defines revocation by index range but GET /revoked format
+    // and authentication are not yet defined. Documented stub.
+    add("revocation", true, "not implemented");
+
     // 11. Expiry (10-minute grace period).
     const now   = Math.floor(Date.now() / 1000);
     const grace = 600;

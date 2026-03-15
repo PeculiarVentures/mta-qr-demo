@@ -181,6 +181,7 @@ export class Issuer {
       sig_alg:            this.sigAlg,
       witness_quorum:     this.witnesses.length,
       checkpoint_url:     checkpointUrl,
+      batch_size:         this.batchSize,
       witnesses: this.witnesses.map(w => ({
         name:        w.name,
         key_id_hex:  Buffer.from(w.keyId).toString("hex"),

@@ -91,10 +91,19 @@ func New() *Verifier {
 }
 
 // AddAnchor registers a trusted issuer.
-func (v *Verifier) AddAnchor(a *TrustAnchor) {
+// Returns an error if the 8-byte origin_id collides with an existing entry
+// whose full origin string differs — such a collision would make origin-based
+// routing ambiguous and could cause assertions to be validated against the
+// wrong issuer key.
+func (v *Verifier) AddAnchor(a *TrustAnchor) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if existing, ok := v.anchors[a.OriginID]; ok && existing.Origin != a.Origin {
+		return fmt.Errorf("origin_id collision: 0x%016x is shared by %q and %q — "+
+			"two distinct origins must not produce the same 8-byte origin_id", a.OriginID, existing.Origin, a.Origin)
+	}
 	v.anchors[a.OriginID] = a
+	return nil
 }
 
 // Anchors returns all registered anchors (for display).
@@ -269,7 +278,12 @@ func (v *Verifier) Verify(payloadBytes []byte) *Result {
 		SchemaID uint64         `cbor:"3,keyasint"`
 		Claims   map[string]any `cbor:"4,keyasint"`
 	}
-	dm, _ := cborlib.DecOptions{}.DecMode()
+	// Use the strict decode mode: enforces DupMapKeyEnforcedAPF so that
+	// CBOR entries with duplicate map keys are rejected at decode time
+	// rather than being caught later (indirectly) by the hash mismatch.
+	dm, _ := cborlib.DecOptions{
+		DupMapKey: cborlib.DupMapKeyEnforcedAPF,
+	}.DecMode()
 	if err := dm.Unmarshal(p.TBS[1:], &entry); err != nil {
 		return fail("CBOR decode", fmt.Sprintf("decode failed: %v", err))
 	}
@@ -277,6 +291,14 @@ func (v *Verifier) Verify(payloadBytes []byte) *Result {
 	res.IssuanceTime = entry.Times[0]
 	res.ExpiryTime = entry.Times[1]
 	res.SchemaID = entry.SchemaID
+
+	// 10. Revocation check.
+	// NOTE: Revocation is not yet implemented. The spec defines revocation by
+	// index range (SPEC.md §Revocation), but the GET /revoked response format
+	// and signing are not yet defined. This step is a documented stub — it is
+	// intentionally absent rather than silently skipped.
+	// TODO: fetch and check revoked index ranges from anchor.RevocationURL before production use.
+	add("Revocation check", true, "not implemented — no revocation list defined yet")
 
 	// 11. Expiry check (10-minute grace period).
 	const grace = uint64(600)

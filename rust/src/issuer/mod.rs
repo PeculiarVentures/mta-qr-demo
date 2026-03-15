@@ -204,6 +204,7 @@ impl Issuer {
             "sig_alg":            self.signer.alg(),
             "witness_quorum":     state.witnesses.len(),
             "checkpoint_url":     checkpoint_url,
+            "batch_size":         self.batch_size,
             "witnesses":          witnesses,
         }))?)
     }
