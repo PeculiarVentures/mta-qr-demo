@@ -147,6 +147,8 @@ func handleIssue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req IssueRequest
+	// Limit request body to prevent memory exhaustion from oversized payloads.
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
 		return

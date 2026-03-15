@@ -489,9 +489,23 @@ async function loadTC(u) {
 async function refreshAnchors() {
   const list = await (await fetch('/anchors')).json();
   document.getElementById('anchor-count').textContent = list.length + ' anchor' + (list.length !== 1?'s':'');
-  document.getElementById('anchors').innerHTML = list.length === 0
-    ? '<div style="font-size:12px;color:#8b949e">No anchors loaded</div>'
-    : list.map(a=>'<div class="anchor-item"><div class="ao">'+a.origin+'</div><div class="ad">sig_alg='+a.sig_alg+' quorum='+a.witness_quorum+'</div></div>').join('');
+  const anchorsEl = document.getElementById('anchors')!;
+  anchorsEl.innerHTML = '';
+  if (list.length === 0) {
+    const empty = document.createElement('div');
+    empty.style.cssText = 'font-size:12px;color:#8b949e';
+    empty.textContent = 'No anchors loaded';
+    anchorsEl.appendChild(empty);
+  } else {
+    list.forEach((a: any) => {
+      const item   = document.createElement('div'); item.className = 'anchor-item';
+      const origin = document.createElement('div'); origin.className = 'ao'; origin.textContent = a.origin;
+      const detail = document.createElement('div'); detail.className = 'ad';
+      detail.textContent = 'sig_alg=' + a.sig_alg + ' quorum=' + a.witness_quorum;
+      item.appendChild(origin); item.appendChild(detail);
+      anchorsEl.appendChild(item);
+    });
+  }
 }
 async function doVerify() {
   const raw = document.getElementById('payload-input').value.trim();

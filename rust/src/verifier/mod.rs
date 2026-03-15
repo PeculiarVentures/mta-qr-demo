@@ -280,8 +280,16 @@ impl Verifier {
                     .build()?;
                 let resp = client.get(&self.trust.checkpoint_url).send().await
                     .map_err(|e| anyhow!("GET {}: {e}", self.trust.checkpoint_url))?;
-                resp.text().await
-                    .map_err(|e| anyhow!("read checkpoint: {e}"))?
+                // Cap to 64 KB — a valid checkpoint is ~200 bytes.
+                // A malicious issuer serving a gigabyte response would otherwise
+                // exhaust verifier memory.
+                let bytes = resp.bytes().await
+                    .map_err(|e| anyhow!("read checkpoint: {e}"))?;
+                if bytes.len() > 64 * 1024 {
+                    return Err(anyhow!("checkpoint response too large ({} bytes)", bytes.len()));
+                }
+                String::from_utf8(bytes.to_vec())
+                    .map_err(|e| anyhow!("checkpoint not valid UTF-8: {e}"))?
             }
             #[cfg(not(feature = "goodkey"))]
             {
