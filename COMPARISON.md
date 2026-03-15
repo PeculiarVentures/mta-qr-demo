@@ -50,11 +50,15 @@ handles short-lived tokens. For medium and long-lived credentials, the protocol
 provides explicit revocation using a filter cascade approach inspired by CRLite:
 the issuer constructs a signed Bloom filter cascade encoding revoked entry indices
 and serves it at `GET /revoked` on the charge-cycle schedule. Verifiers cache the
-artifact locally and query it at scan time — no network access required. Because
-the issuer is also the aggregator (unlike WebPKI CRLite, which requires a
-third-party aggregator), no additional trust infrastructure is needed beyond the
-existing trust configuration. The MTA-QR revocation format is not wire-compatible
-with CRLite artifacts. For credentials that must
+artifact locally and query it at scan time. Because the issuer is also the
+aggregator (unlike WebPKI CRLite, which requires a third-party aggregator), no
+additional trust infrastructure is needed beyond the existing trust configuration.
+The MTA-QR revocation format is not wire-compatible with CRLite artifacts.
+
+Revocation propagation latency is bounded by the verifier's charge cycle. Deployments
+with urgent revocation needs can use short TTLs or Mode 2 online verification.
+Mode 0 (fully offline) deployments cannot perform online revocation checks and must
+pre-load a revocation artifact or treat TTL expiry as the effective revocation mechanism. For credentials that must
 remain verifiable over years, the post-quantum signing posture also matters:
 a credential issued today under a classical algorithm may need to be verifiable
 long after quantum computers make that algorithm breakable.
@@ -67,7 +71,7 @@ long after quantum computers make that algorithm breakable.
 |---|---|---|---|---|
 | Short-lived credentials | Yes | Yes | Yes | Yes |
 | Medium and long-lived credentials | No | Partial | No | Yes |
-| Auditable revocation | No | No | No | Yes |
+| Auditable revocation | No | No | No | Yes² |
 | Post-quantum safe | Yes | No | Yes | Yes |
 | PQC migration needs only a key update, not a new protocol | n/a | No | n/a | Yes |
 | PQC signature fits in QR payload | n/a | No | n/a | Yes |
@@ -89,6 +93,14 @@ screenshot being sold to a second buyer for any event where entry happens within
 a defined window. Rotating barcodes provide a fixed sub-minute window regardless
 of use case. Single-use enforcement within the TTL window requires deduplication
 at the verifier.
+
+² Revocation artifacts are distributed on the charge-cycle schedule. Propagation
+latency is bounded by the verifier's charge cycle — typically hours. Deployments
+with urgent revocation requirements (sub-hour) should use short credential TTLs
+or Mode 2 (online verification). Mode 0 deployments cannot perform online
+revocation checks; they must pre-load a revocation artifact or rely on TTL
+expiry. See SPEC.md §Revocation — Revocation Propagation Latency by Deployment
+Scenario.
 
 ---
 

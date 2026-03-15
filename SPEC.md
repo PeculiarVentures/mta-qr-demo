@@ -886,6 +886,31 @@ without a live backend service. Classical issuers (ECDSA P-256, Ed25519)
 keep the payload size manageable. PQC Mode 0 with FN-DSA-512 adds up to 666
 bytes for the issuer signature and requires controlled print and scan conditions.
 
+**Mode 0 and revocation.** Mode 0 payloads contain no `revocation_url` and
+the scanning device has no live channel to the issuer. This means Mode 0
+cannot perform a revocation check unless a revocation artifact was pre-loaded
+into the verifier's cache before the device went offline. Two strategies:
+
+- **Pre-loaded artifact.** Fetch the revocation artifact during trust config
+  provisioning or during the same charge-cycle sync that loads the trust config.
+  The verifier can then check revocation against the cached artifact at scan time.
+  The artifact covers entries up to its `tree_size`; entries issued after that
+  point are not covered and the verifier must apply its fail-closed or fail-open
+  policy for those entries.
+
+- **TTL as revocation substitute.** For deployments where loading a revocation
+  artifact offline is operationally infeasible, use short credential TTLs as the
+  primary revocation mechanism. An expired credential is automatically rejected
+  by step 11 of the verification flow. Revocation through artifact means the
+  credential can be invalidated before its TTL expires; TTL alone means waiting
+  for natural expiry. For Mode 0 deployments without artifact pre-loading, the
+  deployment's TTL policy IS the effective revocation policy.
+
+Mode 0 deployments with urgent revocation requirements (access control, border
+crossing, high-value identity documents) SHOULD use Mode 1 instead, or pre-load
+the revocation artifact during provisioning and accept that entries beyond the
+artifact's `tree_size` are not covered.
+
 ### Mode 1: Cached Checkpoint (Offline After Prefetch)
 
 The QR payload includes the assertion content and inclusion proof. No signatures
@@ -929,6 +954,15 @@ over TLS with verifiable server identity.
 
 **Best for:** High-throughput fixed-infrastructure scanning where connectivity
 is guaranteed and the smallest possible payload size is a priority.
+
+**Mode 2 and urgent revocation.** Because Mode 2 already requires a live
+network connection at scan time to fetch the checkpoint and inclusion proof,
+deployments with urgent revocation requirements can fetch the revocation
+artifact at scan time rather than relying on a cached version. This makes
+revocation as fresh as the artifact the issuer has most recently published,
+typically within minutes of the revocation decision. The tradeoff is that
+every scan requires two round-trips (checkpoint + revocation artifact) in
+addition to the tile fetch for the inclusion proof.
 
 ---
 
@@ -1106,7 +1140,11 @@ trust distribution requirement — it only eliminates the checkpoint fetch.
     same algorithm as Mode 1 steps 8a–8b. The root_hash from the payload is
     the expected value; it has already been authenticated in steps 6–7.
 
-10. Check entry_index not revoked. Same procedure as Mode 1 step 9.
+10. Check entry_index not revoked.
+    If a revocation artifact was pre-loaded for this origin, query it
+    as in Mode 1 step 9. If no artifact is cached, apply the deployment's
+    fail-closed or fail-open policy — Mode 0 has no live channel to
+    fetch one at scan time. See §Mode 0 — Mode 0 and revocation.
 
 11. Check expiry: expiry_time MUST be > (current_time - grace_period).
 
@@ -1699,6 +1737,55 @@ The issuer signature (step 2 of the load procedure) is verified once per
 artifact, not on every query. The in-cache integrity hash (query step 1)
 is a lightweight substitute that detects corruption without repeated
 asymmetric signature verification overhead.
+
+### Revocation Propagation Latency by Deployment Scenario
+
+Revocation artifacts are distributed on the charge-cycle schedule — the same
+cadence as checkpoint updates. This means revocation propagation latency is
+bounded by the verifier's charge cycle, not by the protocol itself. The
+following table maps the use cases from §Use Cases to the appropriate
+revocation strategy.
+
+| Scenario | Typical TTL | Revocation urgency | Recommended strategy |
+|----------|-------------|-------------------|----------------------|
+| Event ticketing | Hours | Hours to days (refund, fraud) | Mode 1, charge cycle; TTL matches event window |
+| Transit passes | Minutes–hours | Hours (account fraud) | Mode 1, charge cycle; short TTL limits exposure |
+| Driver's license / government ID | Years | Hours to days (suspension, death) | Mode 1 with calibrated staleness threshold |
+| Border crossing / visa | Months | Hours (revocation at departure) | Mode 1; staleness threshold calibrated to issuance rate |
+| Building badge / access control | Indefinite until revoked | Minutes to hours (termination, incident) | Mode 1 with short TTL, **or** Mode 2 (online verification) |
+| Pharmaceutical / supply chain | Days–years | Hours to days (recall) | Mode 1, charge cycle; batch revocation natural |
+| Professional certification | Years | Days (disciplinary action) | Mode 1, charge cycle |
+| Rotating membership / subscription | Minutes | Hours to days (cancellation) | Mode 1, short TTL; charge cycle sufficient |
+
+**Urgent revocation (sub-charge-cycle).** For scenarios where a credential must
+be invalidated faster than the next charge cycle — primarily access control and
+high-value government identity — two options exist:
+
+1. **Short TTL.** Issue credentials with a TTL shorter than the acceptable
+   revocation window. A 15-minute TTL means a compromised credential expires
+   naturally within 15 minutes without any revocation infrastructure. The
+   tradeoff is that every scan on a cache-warm verifier is still offline; the
+   issuer must re-issue frequently.
+
+2. **Mode 2 (online verification).** Mode 2 fetches the checkpoint and inclusion
+   proof at scan time over a live connection. Pair Mode 2 with an online
+   revocation check (verifier fetches `GET /revoked` at scan time rather than
+   relying on a cached artifact) to achieve near-real-time revocation. This
+   requires guaranteed connectivity at every scanner and makes scan latency
+   dependent on network round-trip time.
+
+**Mode 0 and urgent revocation.** Mode 0 payloads are fully self-contained;
+verifiers cannot perform a network revocation check at scan time. Mode 0 is
+not appropriate for deployments with urgent revocation requirements unless a
+pre-loaded revocation artifact covers all credentials that will be presented.
+See §Mode 0 for the pre-loaded artifact and TTL-as-revocation strategies.
+
+**Staleness threshold calibration.** The `REVOCATION_STALE_THRESHOLD` (in
+entry count) must be calibrated to the deployment's issuance rate and
+acceptable revocation latency window. High-volume issuers (thousands per day)
+should use a larger threshold. Low-volume issuers should use a smaller one.
+The default of `2 × BATCH_SIZE = 32` entries is a starting point, not a
+universally appropriate value.
 
 ### Size Estimates
 

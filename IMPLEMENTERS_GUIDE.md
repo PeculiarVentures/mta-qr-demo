@@ -538,6 +538,14 @@ Model before writing any code. Key points that affect implementation decisions:
   before accepting any payload. There is no safe baseline without both.
 - An empty cascade (`num_levels=0`) is valid when R is empty. It is not
   distinguishable from a malicious empty artifact by cryptographic means alone.
+- **Mode 0 deployments:** the verifier has no live channel at scan time.
+  If no cached artifact exists, apply fail-closed or fail-open per deployment
+  config. The Mode 0 verification step must not silently skip revocation — it
+  must emit a trace step indicating whether the check ran or was skipped.
+- **Staleness threshold calibration:** `2 × BATCH_SIZE = 32` is a starting
+  point. High-volume issuers need a larger threshold; low-volume issuers need
+  a smaller one. The threshold is entry-count-based — calibrate to your
+  issuance rate and acceptable revocation propagation window.
 
 **When implementing the cascade construction:**
 
