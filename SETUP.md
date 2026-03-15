@@ -1,45 +1,30 @@
-# Repository Setup Checklist
+# Repository Setup
 
-Two things in this repository contain a placeholder that must be replaced
-before the first `git push`. Everything else is ready to commit as-is.
+This file documents the two pre-push configuration steps that were required
+when this repository was first created. Both have been completed.
 
 ---
 
-## 1. Go module path
+## 1. Go module path — done
 
-`go/go.mod` currently declares:
+`go/go.mod` declares the module path as `github.com/PeculiarVentures/mta-qr-demo`.
+All Go source files import using this path. No action required.
 
-```
-module github.com/mta-qr/demo
-```
+## 2. CI badge in README — done
 
-This is a placeholder. Replace it with the actual GitHub path for this repo.
-For example, if the repo will live at `github.com/PeculiarVentures/mta-qr-demo`:
+`README.md` contains the correct badge URL for `PeculiarVentures/mta-qr-demo`.
+No action required.
+
+---
+
+If you fork this repository and host it elsewhere, update both:
 
 ```bash
-# From the repo root
+# Replace module path throughout Go source
 find go/ -name "*.go" -exec \
-  sed -i 's|github.com/mta-qr/demo|github.com/PeculiarVentures/mta-qr-demo|g' {} +
-sed -i 's|module github.com/mta-qr/demo|module github.com/PeculiarVentures/mta-qr-demo|' go/go.mod
+  sed -i 's|github.com/PeculiarVentures/mta-qr-demo|github.com/YOUR_ORG/YOUR_REPO|g' {} +
+sed -i 's|module github.com/PeculiarVentures/mta-qr-demo|module github.com/YOUR_ORG/YOUR_REPO|' go/go.mod
+
+# Update CI badge in README.md line 3
+sed -i 's|PeculiarVentures/mta-qr-demo|YOUR_ORG/YOUR_REPO|g' README.md
 ```
-
-Then verify the build still passes:
-
-```bash
-cd go && go build ./... && go test ./... -count=1
-```
-
-## 2. CI badge in README
-
-`README.md` line 3 contains:
-
-```
-![CI](https://github.com/REPO_PATH/actions/workflows/ci.yml/badge.svg)
-```
-
-Replace `REPO_PATH` with the actual `org/repo` value, e.g. `PeculiarVentures/mta-qr-demo`.
-
----
-
-Both changes are two find-and-replace operations. Nothing else in the repo
-requires manual editing before the first push.

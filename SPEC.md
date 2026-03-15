@@ -700,6 +700,97 @@ level is even (left child) or odd (right child) respectively.
 
 ---
 
+## Tiled Two-Level Merkle Tree
+
+MTA-QR uses a two-level tiled Merkle tree rather than a flat RFC 6962 tree.
+The reason is payload size stability under high issuance volume.
+
+A flat RFC 6962 tree over N entries produces inclusion proofs of ⌈log₂(N)⌉
+hashes. Every time the log doubles in size, the proof grows by one 32-byte
+hash. For a high-volume issuer — say a transit system rotating membership
+cards every 5 minutes — a flat tree produces larger QR codes over time until
+the payload no longer fits a fixed QR version. The tiled structure eliminates
+this growth by bounding proof size to a fixed maximum regardless of total
+log size.
+
+**Structure.** Entries are organized into fixed-size batches of `BATCH_SIZE`
+entries. Each batch has its own inner Merkle tree whose root is a `batch_root`.
+The `batch_root` values are then organized into an outer (parent) Merkle tree
+whose root is the checkpoint root hash.
+
+**Two-phase inclusion proof.** Each QR payload carries two concatenated proof
+segments, split by `inner_proof_count`:
+
+- **Phase A (inner):** `inner_proof_count` sibling hashes from `entry_hash` to
+  `batch_root` (the batch-level proof).
+- **Phase B (outer):** the remaining `proof_count − inner_proof_count` hashes
+  from `batch_root` to the parent root (the checkpoint root hash).
+
+**Size bound.** With `BATCH_SIZE=16` and `OUTER_MAX_BATCHES=16`:
+
+- Inner proof: ≤ log₂(16) = 4 hashes (128 bytes), fixed forever regardless of
+  how many batches exist.
+- Outer proof: ≤ log₂(16) = 4 hashes (128 bytes), fixed until 256 total entries
+  are reached, at which point the outer tree rolls over to a new log epoch.
+- Maximum total proof: 8 hashes = 256 bytes, regardless of total log size.
+
+This is why Mode 1 payloads have a stable size. A ticket issued on day one and
+a ticket issued after a year of high-volume issuance produce payloads of the
+same size, encoding to the same QR version.
+
+**`BATCH_SIZE` and the trust configuration.** `BATCH_SIZE` is a deployment
+parameter that must be consistent between issuers and verifiers. It is carried
+in the trust configuration so verifiers know how to interpret the
+`inner_proof_count` split. The reference implementation uses `BATCH_SIZE=16`.
+
+**Roll-over.** When the outer tree fills (num_batches exceeds
+`OUTER_MAX_BATCHES`), the issuer resets the log and issues a new null_entry at
+index 0 of the new epoch. Existing payloads from the previous epoch remain
+verifiable because they carry their own proof hashes — they do not depend on
+the current log state.
+
+---
+
+## Trust Configuration Schema
+
+The trust configuration is the out-of-band data a verifier must have before it
+can verify any payload from an issuer. It is a JSON object with the following
+fields:
+
+```json
+{
+  "origin":          "example.com/access/ed25519/v1",
+  "issuer_pub_key_hex": "...",
+  "sig_alg":         6,
+  "issuer_key_name": "example-issuer+abcd1234+<base64_pubkey>",
+  "witnesses": [
+    {
+      "key_name": "witness-a+11223344+<base64_pubkey>"
+    }
+  ],
+  "witness_quorum":  1,
+  "checkpoint_url":  "https://example.com/checkpoint",
+  "batch_size":      16
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `origin` | string | Full UTF-8 origin string. Must be unique per (key, algorithm) pair. |
+| `issuer_pub_key_hex` | hex string | Issuer public key bytes, hex-encoded. Format depends on `sig_alg`. |
+| `sig_alg` | integer | Algorithm identifier matching the payload flags bit field. |
+| `issuer_key_name` | string | Note verifier key name for the issuer key, used to locate the issuer's signature line in checkpoint notes. |
+| `witnesses` | array | List of witness entries. Each has a `key_name` in signed-note verifier format. |
+| `witness_quorum` | integer | Minimum number of distinct witness cosignatures required. Must be ≥ 1 and ≤ len(witnesses). |
+| `checkpoint_url` | string | URL of the `GET /checkpoint` endpoint. Used by Mode 1 verifiers on cache miss. |
+| `batch_size` | integer | Batch size for the two-phase Merkle proof. Default 16. Must match the issuer's configuration. |
+
+The trust configuration is distributed out-of-band by the issuer — typically
+bundled with the verifier application or fetched once at provisioning time from
+a well-known endpoint. It is not communicated via the QR payload.
+
+---
+
 ## Verification Modes
 
 ### Mode 0: Embedded (No Checkpoint Fetch)
@@ -801,14 +892,28 @@ is guaranteed and the infrastructure operator is fully trusted.
 
 ## Issuance Flow
 
+Steps 1–4 are common to all modes. Step 5 varies by mode.
+
 1. The asserting party requests issuance.
 2. The issuer validates the request.
 3. The issuer appends the log entry to the issuance log.
 4. Periodically (every 2–30 seconds depending on throughput): compute the new
    Merkle root, format a checkpoint body, sign with the issuer key per `sig_alg`,
    submit to the witness network, collect cosignatures, publish at `GET /checkpoint`.
-5. For each log entry in this batch, compute the inclusion proof, assemble the
-   `MTAQRPayload`, encode to binary, and generate the QR code.
+5. For each log entry in this batch, assemble the `MTAQRPayload` based on mode:
+
+   **Mode 0:** Compute the two-phase inclusion proof. Embed the proof, plus the
+   checkpoint root hash, issuer signature, and witness cosignatures directly in
+   the payload. The payload is self-contained for verification purposes.
+
+   **Mode 1:** Compute the two-phase inclusion proof. Embed the proof in the
+   payload. Leave out the checkpoint signatures — verifiers fetch those
+   separately and cache them.
+
+   **Mode 2:** Set `proof_count=0`. Embed only the log coordinates
+   (`tree_size`, `entry_index`). The verifier fetches the proof at scan time.
+
+6. Encode the payload to binary and generate the QR code.
 
 ---
 
@@ -967,6 +1072,56 @@ and conditional fetch (Mode 1 steps 5–6e). In Mode 0 the checkpoint
 authenticity is established by verifying the embedded signatures directly
 against the trust configuration rather than by fetching a signed note from
 a network endpoint.
+
+---
+
+## Verification Flow (Mode 2)
+
+Mode 2 payloads carry no inclusion proof (`proof_count=0`). The verifier must
+fetch both the checkpoint and the inclusion proof from the issuer's tile server
+at scan time.
+
+**This SDK does not implement tile fetching.** The steps below describe the
+complete Mode 2 verification algorithm for implementors building a production
+Mode 2 scanner. The reference SDK validates everything up to step 6 and then
+returns a result with `mode=2` without completing steps 7–8. Callers must
+check the `mode` field on the result and treat Mode 2 results as
+inclusion-unverified.
+
+```
+1.  Decode MTAQRPayload binary. Confirm proof_count == 0.
+
+2.  Reject entry_index == 0 immediately.
+
+3.  If self_describing=1: read origin from envelope. Look up trust anchor by
+    origin_id. MUST verify envelope origin == trust config origin. If
+    self_describing=0: look up trust anchor by origin_id.
+
+4.  Verify sig_alg in payload == sig_alg in trust config for this origin.
+    Reject on mismatch (downgrade attack prevention).
+
+5.  Fetch GET /checkpoint from the trust config checkpoint_url.
+    Verify response tree_size >= entry_index + 1 (entry must be in this tree).
+    Verify issuer signature and witness cosignature quorum exactly as in
+    Mode 1 steps 6c–6d.
+
+6.  Compute entry_hash = SHA-256(0x00 || tbs).
+
+7.  Fetch the inclusion proof from the tile server. The tile addressing scheme
+    is not yet defined — see Open Questions (SPEC.md does not define the Mode 2
+    tile server API). Verify the two-phase tiled Merkle inclusion proof against
+    the checkpoint root hash from step 5.
+
+8.  Check entry_index not in revoked ranges. Check expiry.
+
+9.  Decode entry_type_byte and act on claims.
+```
+
+**Security note.** Steps 5–7 require network access at scan time and the
+server provides the proof. A compromised or MITM'd server can fabricate an
+inclusion proof. Mode 2 deployments MUST serve the tile endpoint over TLS with
+verifiable server identity. Mode 2 SHOULD NOT be used where tamper-evidence
+against a compromised infrastructure operator is a security requirement.
 
 ---
 
@@ -1140,7 +1295,7 @@ signs independently and the other's verify function MUST accept that signature.
 Before any MTA-QR implementation can use ECDSA P-256, ECDSA P-384, or FN-DSA-512
 for checkpoint signing, a note signature algorithm type must be registered for
 each at C2SP. Ed25519 (`sig_alg=6`) is fully specified and not blocked.
-ML-DSA-44 (`sig_alg=1`) is implemented in all four reference implementations (Go via cloudflare/circl; TypeScript via @noble/post-quantum; Rust via ml-dsa; Java via BouncyCastle 1.79+ MLDSAKeyPairGenerator) but also requires C2SP note signature registration before it can interoperate with standard tlog-checkpoint parsers.
+ML-DSA-44 (`sig_alg=1`) is implemented in all four reference implementations (Go via cloudflare/circl; TypeScript via @noble/post-quantum; Rust via the ml-dsa crate; Java via BouncyCastle 1.79+ MLDSAKeyPairGenerator). It also requires C2SP note signature registration before it can interoperate with standard tlog-checkpoint parsers.
 
 For ECDSA P-256 and P-384, the registration must specify:
 - Note verifier key name format for ECDSA public keys (uncompressed point, base64-encoded)

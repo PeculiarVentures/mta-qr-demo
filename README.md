@@ -4,7 +4,7 @@
 
 Reference implementation of **MTA-QR** — Merkle Tree Assertions for Verifiable QR Codes.
 
-MTA-QR issues cryptographically authenticated QR codes backed by a transparency log. Each QR code carries a Merkle inclusion proof; a verifier checks it against a locally cached checkpoint signed by the issuer and witnessed by an independent quorum — entirely offline after a prefetch.
+MTA-QR issues cryptographically authenticated QR codes backed by a transparency log. Each QR code is a log entry with a Merkle inclusion proof tying it to a signed, witnessed checkpoint. Verification is offline after a one-time prefetch (Mode 1), or fully embedded in the payload for deployments where no checkpoint fetch is possible (Mode 0), or deferred to a tile server for high-throughput fixed-infrastructure scanning (Mode 2). The protocol is algorithm-agnostic and PQC-ready.
 
 This repository provides four independent implementations (Go, TypeScript, Rust, Java) that pass a shared interop matrix across three signing algorithms and two payload modes.
 
@@ -244,7 +244,9 @@ These are genuine gaps that should be addressed before production use. They are 
 
 **Witnesses always use Ed25519** regardless of issuer `sig_alg`, per c2sp.org/tlog-cosignature.
 
-**Self-describing payloads.** The server-side SDK issuers (Go, TypeScript, Rust, Java) always set the self-describing flag (bit 7 of the flags byte) and embed the origin string in the payload. The browser demo issues bound payloads (no origin embedded) as a deliberate simplification — the trust config is held in-page.
+**Bound vs self-describing payloads.** The flags byte has a `self_describing` bit (bit 7). When set, the payload envelope contains the full origin string so a verifier can identify the issuer without consulting an external directory. When clear (bound mode), the payload contains only the 8-byte `origin_id` (a truncated SHA-256 of the origin string) and the verifier must already know which full origin that corresponds to.
+
+The server-side SDK issuers (Go, TypeScript, Rust, Java) always use self-describing mode — the origin is embedded in every payload. The browser demo uses bound mode as a deliberate simplification: the trust config is held in-page and the origin doesn't need to be transmitted. Self-describing mode is the correct choice for real deployments where verifiers load trust configs independently.
 
 **CBOR claim values.** Claim values may be strings or integers. The Java CBOR decoder handles both — earlier versions called `.AsString()` unconditionally, which failed on integer-valued claims.
 
