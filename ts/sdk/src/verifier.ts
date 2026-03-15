@@ -73,7 +73,7 @@ interface CachedCheckpoint {
   fetchedAt: number;
 }
 
-const BATCH_SIZE = 16; // must match Issuer
+// BATCH_SIZE is read from trust.batchSize at verification time
 
 export type NoteProvider = (url: string) => string | Promise<string>;
 
@@ -198,11 +198,12 @@ export class Verifier {
     } else {
       // Mode 1 (cached): two-phase tiled Merkle proof embedded in payload.
       const globalIdx  = Number(p.entryIndex);
-      const innerIdx   = globalIdx % BATCH_SIZE;
-      const batchIdx   = Math.floor(globalIdx / BATCH_SIZE);
-      const numBatches = Math.ceil(Number(p.treeSize) / BATCH_SIZE);
-      const batchStart = batchIdx * BATCH_SIZE;
-      const thisBatchSz = Math.min(BATCH_SIZE, Number(p.treeSize) - batchStart);
+      const batchSize  = this.trust.batchSize;
+      const innerIdx   = globalIdx % batchSize;
+      const batchIdx   = Math.floor(globalIdx / batchSize);
+      const numBatches = Math.ceil(Number(p.treeSize) / batchSize);
+      const batchStart = batchIdx * batchSize;
+      const thisBatchSz = Math.min(batchSize, Number(p.treeSize) - batchStart);
 
       const innerProof = p.proofHashes.slice(0, p.innerProofCount);
       const outerProof = p.proofHashes.slice(p.innerProofCount);
@@ -235,10 +236,13 @@ export class Verifier {
     catch (e) { return fail("cbor decode", `${e}`); }
     add("cbor decode", true, `schema_id=${entry.schemaId} issued=${entry.times[0]} expires=${entry.times[1]}`);
 
-    // 10. Revocation check — not yet implemented.
-    // The spec defines revocation by index range but GET /revoked format
-    // and authentication are not yet defined. Documented stub.
-    add("revocation", true, "not implemented");
+    // 10. Revocation check.
+    // The revocation protocol is fully specified in SPEC.md §Revocation:
+    // a Bloom filter cascade over revoked/valid entry indices, signed with
+    // the issuer key, served at GET /revoked (this.trust.revocationUrl).
+    // TODO: implement cascade fetch, cache, staleness check, and query.
+    // Fail-open is NOT the correct default. See issue #14.
+    add("revocation", false, "not implemented — stub only, revocation not checked");
 
     // 11. Expiry (10-minute grace period).
     const now   = Math.floor(Date.now() / 1000);

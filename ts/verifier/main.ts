@@ -168,9 +168,12 @@ async function verify(payloadBytes: Uint8Array): Promise<VerifyResult> {
   res.schemaId     = entry.schemaId;
 
   // 10. Revocation check.
-  // NOTE: Not implemented. The spec defines revocation by index range but the
-  // GET /revoked format and authentication are not yet defined. Documented stub.
-  add("Revocation check", true, "not implemented — no revocation list defined yet");
+  // The revocation protocol is fully specified in SPEC.md §Revocation:
+  // a Bloom filter cascade over revoked/valid entry indices, signed with
+  // the issuer key, served at GET /revoked.
+  // TODO: implement cascade fetch, cache, staleness check, and query.
+  // Fail-open is NOT the correct default. See issue #14.
+  add("Revocation check", false, "not implemented — stub only, revocation not checked");
 
   // 11. Expiry check (10-minute grace).
   const now = Math.floor(Date.now() / 1000);

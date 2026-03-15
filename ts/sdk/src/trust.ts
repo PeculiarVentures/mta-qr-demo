@@ -40,6 +40,10 @@ export interface TrustConfig {
   witnesses: WitnessEntry[];
   /** URL of the issuer's /checkpoint endpoint. */
   checkpointUrl: string;
+  /** URL of the issuer's /revoked endpoint. Empty string if not provided. */
+  revocationUrl: string;
+  /** Batch size for two-phase Merkle proof. Read from trust config; defaults to 16. */
+  batchSize: number;
 }
 
 /** Raw JSON shape written by the issuer's /trust-config endpoint. */
@@ -51,6 +55,8 @@ interface TrustConfigJSON {
   sig_alg: number;
   witness_quorum: number;
   checkpoint_url: string;
+  revocation_url?: string;
+  batch_size?: number;
   witnesses: Array<{
     name: string;
     key_id_hex: string;
@@ -95,6 +101,8 @@ function fromJSON(raw: TrustConfigJSON): TrustConfig {
     witnessQuorum,
     witnesses,
     checkpointUrl: raw.checkpoint_url,
+    revocationUrl: raw.revocation_url ?? "",
+    batchSize: (raw.batch_size && raw.batch_size > 0) ? raw.batch_size : 16,
   };
 }
 

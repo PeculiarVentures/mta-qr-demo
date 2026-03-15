@@ -96,7 +96,7 @@ The issuer signs this body directly. Witnesses sign a `cosignature/v1` message t
 
 Key ID derivation (per c2sp.org/signed-note): `SHA-256(key_name || 0x0A || 0x01 || raw_pubkey)[0:4]` — the first 4 bytes of the SHA-256 of the bare key name, a literal newline byte (0x0A), the Ed25519 type identifier byte (0x01), and the 32-byte raw public key. The earlier formula `SHA-256("<n>+<base64(pubkey)>")[0:4]` shown in older notes was incorrect and has been superseded in the code.
 
-`OriginID` is `SHA-256(origin)[0:8]` stored as a big-endian uint64. It is a routing hint, not a collision-resistant identifier. Cache keys and revocation range keys MUST use the full origin string.
+`OriginID` is `SHA-256(origin)[0:8]` stored as a big-endian uint64. It is a routing hint, not a collision-resistant identifier. Cache keys and revocation cache keys MUST use the full origin string.
 
 ### payload
 

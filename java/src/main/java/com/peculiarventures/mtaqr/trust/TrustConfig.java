@@ -33,12 +33,13 @@ public final class TrustConfig {
     public final int    witnessQuorum;
     public final List<WitnessEntry> witnesses;
     public final String checkpointUrl;
+    public final String revocationUrl;
     public final int    batchSize;
 
     private TrustConfig(
             String origin, long originId, String issuerKeyName,
             byte[] issuerPubKey, int sigAlg, int witnessQuorum,
-            List<WitnessEntry> witnesses, String checkpointUrl, int batchSize) {
+            List<WitnessEntry> witnesses, String checkpointUrl, String revocationUrl, int batchSize) {
         this.origin        = origin;
         this.originId      = originId;
         this.issuerKeyName = issuerKeyName;
@@ -47,6 +48,7 @@ public final class TrustConfig {
         this.witnessQuorum = witnessQuorum;
         this.witnesses     = List.copyOf(witnesses);
         this.checkpointUrl = checkpointUrl;
+        this.revocationUrl = revocationUrl != null ? revocationUrl : "";
         this.batchSize     = batchSize;
     }
 
@@ -66,6 +68,7 @@ public final class TrustConfig {
         @JsonProperty("sig_alg")           int    sigAlg,
         @JsonProperty("witness_quorum")    int    witnessQuorum,
         @JsonProperty("checkpoint_url")    String checkpointUrl,
+        @JsonProperty("revocation_url")    String revocationUrl,
         @JsonProperty("witnesses")         List<WitnessJSON> witnesses,
         @JsonProperty("batch_size")        Integer batchSize
     ) {}
@@ -123,10 +126,11 @@ public final class TrustConfig {
                 ") exceeds witness count (" + witnesses.size() + ")");
 
         int batchSize = (raw.batchSize() != null) ? raw.batchSize() : 16;
+        String revocationUrl = raw.revocationUrl() != null ? raw.revocationUrl() : "";
         return new TrustConfig(
             raw.origin(), originId, raw.issuerKeyName(),
             issuerPubKey, raw.sigAlg(), witnessQuorum,
-            witnesses, raw.checkpointUrl(), batchSize
+            witnesses, raw.checkpointUrl(), revocationUrl, batchSize
         );
     }
 }

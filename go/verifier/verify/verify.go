@@ -30,6 +30,8 @@ type TrustAnchor struct {
 	WitnessQuorum int
 	Witnesses     []WitnessEntry
 	CheckpointURL string
+	RevocationURL string // URL of GET /revoked endpoint; empty if issuer omits revocation_url
+	BatchSize     int    // from trust config batch_size; defaults to 16 if absent
 }
 
 // WitnessEntry is a trusted witness key within a TrustAnchor.
@@ -229,9 +231,11 @@ func (v *Verifier) Verify(payloadBytes []byte) *Result {
 	// The checkpoint rootHash is the PARENT tree root (merkle root over batch
 	// roots), not a flat root over all entries. Both phases must pass.
 	//
-	// batchSize matches log.BatchSize (16). Defined as a local constant to
-	// avoid importing the issuer/log package from the verifier.
-	const batchSize  = 16 // must match log.BatchSize
+	// batchSize is read from the trust config (anchor.BatchSize).
+	// The spec requires verifiers to use the batch_size from the trust
+	// configuration, not a hardcoded constant.
+	batchSize := anchor.BatchSize
+	if batchSize <= 0 { batchSize = 16 } // safe default if not set
 	globalIdx    := int(p.EntryIndex)
 	innerIdx     := globalIdx % batchSize
 	batchIdx     := globalIdx / batchSize
@@ -293,12 +297,16 @@ func (v *Verifier) Verify(payloadBytes []byte) *Result {
 	res.SchemaID = entry.SchemaID
 
 	// 10. Revocation check.
-	// NOTE: Revocation is not yet implemented. The spec defines revocation by
-	// index range (SPEC.md §Revocation), but the GET /revoked response format
-	// and signing are not yet defined. This step is a documented stub — it is
-	// intentionally absent rather than silently skipped.
-	// TODO: fetch and check revoked index ranges from anchor.RevocationURL before production use.
-	add("Revocation check", true, "not implemented — no revocation list defined yet")
+	// The revocation protocol is fully specified in SPEC.md §Revocation:
+	// a Bloom filter cascade over revoked/valid entry indices, signed with
+	// the issuer key, served at GET /revoked (anchor.RevocationURL).
+	// This step is a documented stub pending cascade implementation.
+	// SPEC.md §Revocation — Verifier Behavior defines the three-path procedure
+	// for cached artifact, live fetch, and fail-closed/fail-open posture.
+	// TODO: implement cascade fetch, cache, staleness check, and query.
+	// Fail-open is NOT the correct default — this stub must be replaced before
+	// production use. See issue #14.
+	add("Revocation check", false, "not implemented — stub only, revocation not checked")
 
 	// 11. Expiry check (10-minute grace period).
 	const grace = uint64(600)
