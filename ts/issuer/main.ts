@@ -160,10 +160,14 @@ function setCORS(res: ServerResponse) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
+const MAX_BODY = 64 * 1024;
 async function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let body = "";
-    req.on("data", c => body += c);
+    req.on("data", (c: string) => {
+      body += c;
+      if (body.length > MAX_BODY) { req.destroy(); reject(new Error("request body too large")); }
+    });
     req.on("end", () => resolve(body));
     req.on("error", reject);
   });
@@ -433,7 +437,7 @@ async function issue(){
   try{
     const r=await fetch('/issue',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const d=await r.json();
-    if(!r.ok){document.getElementById('status').innerHTML='<div class="status err">'+JSON.stringify(d)+'</div>';btn.disabled=false;btn.textContent='Issue QR Code';return;}
+    if(!r.ok){const el=document.getElementById('status')!;const div=document.createElement('div');div.className='status err';div.textContent=JSON.stringify(d);el.replaceChildren(div);btn.disabled=false;btn.textContent='Issue QR Code';return;}
     lastB64=d.payload_b64;
     document.getElementById('qr-img').src=d.qr_png_url;
     document.getElementById('r-idx').textContent=d.entry_index;
@@ -442,7 +446,7 @@ async function issue(){
     document.getElementById('result').classList.add('show');
     document.getElementById('status').innerHTML='<div class="status ok">Issued at index '+d.entry_index+'</div>';
     refresh();
-  }catch(e){document.getElementById('status').innerHTML='<div class="status err">'+e.message+'</div>';}
+  }catch(e){const el=document.getElementById('status')!;const div=document.createElement('div');div.className='status err';div.textContent=String((e as Error).message);el.replaceChildren(div);}
   btn.disabled=false; btn.textContent='Issue QR Code';
 }
 function openV(port){window.open('http://localhost:'+port+'/?payload='+encodeURIComponent(lastB64),'_blank');}

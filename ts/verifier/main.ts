@@ -185,7 +185,7 @@ async function verify(payloadBytes: Uint8Array): Promise<VerifyResult> {
 }
 
 async function fetchAndVerify(anchor: TrustAnchor, requiredSize: bigint): Promise<[Uint8Array, bigint]> {
-  const resp = await fetch(anchor.checkpointURL);
+  const resp = await fetch(anchor.checkpointURL, { signal: AbortSignal.timeout(10_000) });
   const note = await resp.text();
   return verifyNote(note, anchor, requiredSize);
 }
@@ -252,15 +252,25 @@ function lastFieldBase64(line: string): Uint8Array | null {
 
 // --- HTTP server ---
 function setCORS(res: ServerResponse) {
+  // Wildcard CORS for read-only endpoints. State-mutating endpoints
+  // (load-trust-config) override this with a restrictive policy.
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
+function isLocalhost(host: string): boolean {
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
+const MAX_BODY = 64 * 1024; // 64 KB cap
 async function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let b = "";
-    req.on("data", c => b += c);
+    req.on("data", (c: string) => {
+      b += c;
+      if (b.length > MAX_BODY) { req.destroy(); reject(new Error("request body too large")); }
+    });
     req.on("end", () => resolve(b));
     req.on("error", reject);
   });
@@ -294,13 +304,22 @@ const server = createServer(async (req, res) => {
 
   // POST /load-trust-config or GET /load-trust-config?url=...
   if (url.pathname === "/load-trust-config") {
+    // Do NOT propagate wildcard CORS — this endpoint mutates server state.
+    res.setHeader("Access-Control-Allow-Origin", "null");
     let tcUrl = url.searchParams.get("url") || "http://localhost:8081/trust-config";
     if (req.method === "POST") {
       try { tcUrl = JSON.parse(await readBody(req)).url || tcUrl; } catch {}
     }
+    // SSRF mitigation: only localhost targets permitted.
+    try {
+      const parsed = new URL(tcUrl);
+      if (!isLocalhost(parsed.hostname)) {
+        return json(res, { error: "trust-config URL must target localhost" }, 400);
+      }
+    } catch { return json(res, { error: "invalid URL" }, 400); }
     let tc: any;
     try {
-      const r = await fetch(tcUrl);
+      const r = await fetch(tcUrl, { signal: AbortSignal.timeout(10_000) });
       tc = await r.json();
     } catch (e) {
       return json(res, { error: `fetch ${tcUrl}: ${e}` }, 502);
@@ -504,12 +523,27 @@ function renderResult(r) {
   }
   if (r.claims && Object.keys(r.claims).length>0) {
     document.getElementById('claims-sec').style.display='block';
-    document.getElementById('claims-grid').innerHTML = Object.entries(r.claims).map(([k,v])=>
-      '<div class="cr"><div class="ck">'+k+'</div><div class="cv">'+v+'</div></div>').join('');
+    const grid = document.getElementById('claims-grid')!;
+    grid.innerHTML = '';
+    Object.entries(r.claims as Record<string,unknown>).forEach(([k,v]) => {
+      const row = document.createElement('div'); row.className = 'cr';
+      const key = document.createElement('div'); key.className = 'ck'; key.textContent = k;
+      const val = document.createElement('div'); val.className = 'cv'; val.textContent = String(v);
+      row.appendChild(key); row.appendChild(val); grid.appendChild(row);
+    });
   }
-  document.getElementById('steps').innerHTML = (r.steps||[]).map(s=>
-    '<div class="step '+(s.ok?'ok':'fail')+'">'+'<div>'+(s.ok?'✓':'✗')+'</div>'+'<div><div class="sname">'+s.name+'</div><div class="sdetail">'+s.detail+'</div></div></div>'
-  ).join('');
+  const stepsList = document.getElementById('steps')!;
+  stepsList.innerHTML = '';
+  (r.steps||[]).forEach((s: Step) => {
+    const item = document.createElement('div'); item.className = 'step ' + (s.ok ? 'ok' : 'fail');
+    const icon = document.createElement('div'); icon.textContent = s.ok ? '✓' : '✗';
+    const body = document.createElement('div');
+    const nm   = document.createElement('div'); nm.className = 'sname';   nm.textContent = s.name;
+    const dt   = document.createElement('div'); dt.className = 'sdetail'; dt.textContent = s.detail;
+    body.appendChild(nm); body.appendChild(dt);
+    item.appendChild(icon); item.appendChild(body);
+    stepsList.appendChild(item);
+  });
 }
 function setRhead(cls, icon, txt) {
   document.getElementById('rhead').className='rhead '+cls;
