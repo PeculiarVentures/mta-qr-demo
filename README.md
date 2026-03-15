@@ -16,32 +16,76 @@ This repository provides four independent implementations (Go, TypeScript, Rust,
 
 ---
 
-## Quick start
+## Setup and quick start
 
 ### Prerequisites
 
-| Tool | Version | Purpose |
-|------|---------|---------| 
-| Go | 1.22+ | Go SDK |
-| Node.js | 20+ | TypeScript SDK |
+| Tool | Version | Used for |
+|------|---------|----------|
+| Go | 1.22+ | Go HTTP services + Go SDK |
+| Node.js | 20+ | TypeScript HTTP services + TypeScript SDK |
 | Rust | 1.85+ | Rust SDK |
 | Java | 17+ | Java SDK |
 | Maven | 3.8+ | Java build |
-| Python | 3.10+ | Interop test runner |
+| Python | 3.10+ | Interop test runner (`interop_test.py`) |
 
-### Run the test suites
+### Install dependencies
 
 ```bash
-cd go   && go test ./...
-cd ts   && npm ci && npm run test:all
-cd rust && cargo test
-cd java && mvn test
+# TypeScript HTTP service
+cd ts && npm ci
+
+# TypeScript SDK
+cd ts/sdk && npm install
 ```
 
-### Run the interop matrix
+Go, Rust, and Java fetch dependencies automatically on first build.
+
+### Run the SDK test suites
+
+```bash
+cd go      && go test ./...
+cd ts/sdk  && npm test
+cd rust    && cargo test
+cd java    && mvn test
+```
+
+### Run the TypeScript HTTP service tests
+
+```bash
+cd ts && npm run test:all
+```
+
+### Start the HTTP services locally
+
+```bash
+# Terminal 1 — Go issuer (Ed25519, port 8081)
+cd go && go run ./issuer/
+
+# Terminal 2 — Go verifier (port 8082)
+cd go && go run ./verifier/
+
+# Terminal 3 — TypeScript issuer (Ed25519, port 3001)
+cd ts && npx tsx issuer/main.ts
+
+# Terminal 4 — TypeScript verifier (port 3002)
+cd ts && npx tsx verifier/main.ts
+```
+
+Each service reads `MTA_SIG_ALG` (`ed25519` / `ecdsa-p256` / `mldsa44`) and `MTA_ORIGIN` from the environment. Run multiple instances with different values to cover all three algorithms.
+
+### Run the interop matrix (Go + TypeScript services)
 
 ```bash
 python3 interop_test.py   # or: make interop
+```
+
+Builds Go binaries, starts all six issuers and two verifiers as subprocesses, runs 12 positive cells and 3 negative tests, exits 0 on 15/15.
+
+### Docker Compose
+
+```bash
+docker compose up --build
 ```
 
 ---
@@ -50,7 +94,17 @@ python3 interop_test.py   # or: make interop
 
 **96 cells — 4 issuers × 4 verifiers × 3 algorithms × 2 modes. All pass.**
 
-Each verifier also asserts the `mode` field on the result matches the issued payload mode.
+Each verifier asserts the `mode` field on the result matches the issued payload mode.
+
+### Payload modes
+
+MTA-QR has three payload modes defined in the protocol. Modes 1 and 2 are implemented in all four SDKs. Mode 0 is not yet implemented (see Known Limitations).
+
+**Mode 0 — embedded (fully offline).** The payload includes the inclusion proof and a compact cosigned checkpoint (root hash + issuer signature + witness cosignatures). No network access at scan time. Largest payload size. Not yet implemented.
+
+**Mode 1 — cached checkpoint (offline after prefetch).** The payload includes the inclusion proof but not the checkpoint. The verifier resolves the checkpoint from its local cache; on cache miss it fetches once and caches the result. This is the default mode and the right choice for most deployments.
+
+**Mode 2 — online reference.** The payload contains only the log coordinates — no proof hashes. A scanner fetches the inclusion proof and checkpoint at scan time from a tile server. Smallest payload. Weaker tamper-evidence than Mode 1 (a compromised server can fabricate a proof). **The SDK verifier does not implement tile fetching** — it validates the checkpoint and TBS but skips the inclusion proof step. Use Mode 1 unless you are building your own tile-fetching scanner. See the Mode 2 limitation in Known Limitations.
 
 ### Mode 1 — inclusion proof embedded (48 cells)
 
@@ -103,9 +157,9 @@ The issuer emits no proof hashes. In production a scanner fetches proof tiles fr
 
 ---
 
-## Payload modes
+## Payload mode API
 
-Set `mode` in `IssuerConfig` (default `1`):
+Set `mode` in `IssuerConfig` (default `1`; see the Interop matrix section above for a description of each mode):
 
 ```go
 // Go
