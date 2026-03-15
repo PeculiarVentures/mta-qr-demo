@@ -183,7 +183,7 @@ An assertion is valid if:
 2. The checkpoint has been cosigned by a sufficient quorum of witnesses per the
    trust configuration's quorum policy.
 3. The assertion has not expired.
-4. The entry index is not in a revoked range.
+4. The entry index is not in the revoked set per the issuer's revocation artifact.
 
 That's the entire verification algorithm. Nothing else is required.
 
@@ -804,6 +804,7 @@ fields:
   ],
   "witness_quorum":  1,
   "checkpoint_url":  "https://example.com/checkpoint",
+  "revocation_url": "https://example.com/revoked",
   "batch_size":      16
 }
 ```
@@ -818,6 +819,7 @@ fields:
 | `witness_quorum` | integer | Minimum number of distinct witness cosignatures required. Must be ≥ 1 and ≤ len(witnesses). |
 | `checkpoint_url` | string | URL of the `GET /checkpoint` endpoint. Used by Mode 1 verifiers on cache miss. |
 | `batch_size` | integer | Batch size for the two-phase Merkle proof. Default 16. Must match the issuer's configuration. |
+| `revocation_url` | string | URL of the `GET /revoked` endpoint. Used by verifiers to fetch the revocation artifact on cache miss or first load. Derived from the issuer base URL as `<base_url>/revoked`. |
 
 The trust configuration is distributed out-of-band by the issuer — typically
 bundled with the verifier application or fetched once at provisioning time from
@@ -1011,7 +1013,11 @@ decoded or acted on until all verification steps below have passed.
     BATCH_SIZE is a deployment parameter carried in the trust configuration.
     The reference implementation uses BATCH_SIZE = 16.
 
-9.  Check entry_index not in revoked ranges for this full_origin.
+9.  Check entry_index not revoked.
+    Fetch the revocation artifact from revocation_url on cache miss.
+    Query the cached cascade: if Query(cascade, entry_index) = REVOKED, reject.
+    Apply fail-closed or fail-open policy if no artifact is available.
+    See §Revocation for the full verifier algorithm.
 
 10. Check expiry: expiry_time MUST be > (current_time - grace_period).
     Default grace period: 10 minutes (600 seconds).
@@ -1100,7 +1106,7 @@ trust distribution requirement — it only eliminates the checkpoint fetch.
     same algorithm as Mode 1 steps 8a–8b. The root_hash from the payload is
     the expected value; it has already been authenticated in steps 6–7.
 
-10. Check entry_index not in revoked ranges for this full_origin.
+10. Check entry_index not revoked. Same procedure as Mode 1 step 9.
 
 11. Check expiry: expiry_time MUST be > (current_time - grace_period).
 
@@ -1153,7 +1159,7 @@ not because inclusion proof verification is inherently weaker in Mode 2.
     tile server API). Verify the two-phase tiled Merkle inclusion proof against
     the checkpoint root hash from step 5.
 
-8.  Check entry_index not in revoked ranges. Check expiry.
+8.  Check entry_index not revoked (§Revocation). Check expiry.
 
 9.  Decode entry_type_byte and act on claims.
 ```
@@ -1193,144 +1199,256 @@ distributed to verifiers via the trust configuration.
 
 The filter cascade encodes two disjoint sets derived from the log:
 
-- **R (revoked):** the set of `entry_index` values the issuer has revoked.
+- **R (revoked):** the set of `entry_index` values the issuer has explicitly revoked.
 - **S (valid, non-revoked):** the set of `entry_index` values that have been
-  issued, have not expired, and have not been revoked.
+  issued, have not expired at artifact generation time, and are not in R.
 
-The universe is all issued indices: indices 1 through `tree_size - 1`, excluding
-index 0 (the reserved null entry). Expired entries MAY be excluded from both R
-and S — they are already rejected by the expiry check and need not consume space
-in the filter.
+The universe is indices 1 through `tree_size - 1`. Index 0 (null entry) is
+always excluded from both sets.
 
 A Bloom filter cascade over (R, S) produces a structure with zero false negatives
-(a revoked entry is never reported as valid) and a tunable false positive rate
-(a valid entry may be reported as revoked). The false positive direction is
-deliberately conservative: a false positive causes the verifier to incorrectly
-reject a valid assertion, but never to incorrectly accept a revoked one.
+and a configurable false positive rate. The false positive direction is deliberately
+conservative: a false positive causes the verifier to incorrectly reject a valid
+assertion, but never to incorrectly accept a revoked one.
 
-The cascade construction proceeds per Larisch et al. §III: a Level 0 filter
-encodes R against the universe (R ∪ S). Its false positive set — entries in S
-that hash as members of R — is encoded in a Level 1 filter. This continues until
-the false positive set is empty. Approximately log₂(1/ε) levels are needed,
-where ε is the per-level false positive rate. A false positive rate of ~50% per
-level (1 bit per element) is close to optimal for cascade construction. The total
-size is approximately 1.44 × |R| bits plus metadata.
+### Normative Construction Parameters
 
-For high-volume issuers, the Clubcard construction (Schanck, IEEE S&P 2025)
-reduces artifact size by ~54% by partitioning the revoked set by issuer
-substructure or expiry window before building the cascade. For MTA-QR issuers
-operating a single log, the partitioning dimension is expiry time: entries
-expiring in similar windows can be grouped, reducing the effective universe size
-for each partition. The reference implementation (github.com/mozilla/crlite,
-MPL-2.0) is directly applicable.
+These parameters MUST be used exactly as specified. Any deviation produces
+cascade bytes that will not match test vectors and will not interoperate.
+
+**Element encoding.** Each `entry_index` is encoded as an 8-byte big-endian
+unsigned integer for hashing. No other encoding is permitted.
+
+**Hash function.** SHA-256. Given an element `x` (8-byte big-endian uint64) and
+hash function index `i` (0-indexed), the j-th bit position in a filter of `m` bits is:
+
+```
+bit_position(x, i) = (big_endian_uint64(SHA-256(x || uint8(i))[0:8])) mod m
+```
+
+where `x || uint8(i)` is the 8-byte element followed by one byte containing `i`.
+
+**Number of hash functions per level.** `k = 1`. A single hash function per level.
+This is valid for the cascade construction because false positives are eliminated
+at subsequent levels rather than by multiple hash functions within a single level.
+
+**Bit array size per level.** For a level encoding `n` elements:
+
+```
+m = max(ceil(n * BITS_PER_ELEMENT), MIN_FILTER_BITS)
+
+BITS_PER_ELEMENT = 1.44   (≈ ln(2)^-2, optimal for 50% FPR)
+MIN_FILTER_BITS  = 64
+```
+
+Round `m` up to the nearest multiple of 8 so the bit array is byte-aligned.
+`ceil(n * 1.44)` with a minimum of 64 bits.
+
+**Cascade construction algorithm:**
+
+```
+function BuildCascade(R, S):
+  levels = []
+  current_fp_set = S  // start: false positives at Level 0 are entries in S
+  include_set = R     // Level 0 encodes R
+  level_index = 0
+
+  while include_set is not empty:
+    m = max(ceil(len(include_set) * 1.44), 64)
+    m = ceil(m / 8) * 8  // round up to byte boundary
+    bits = zero_array(m)
+
+    for x in sorted(include_set, ascending):
+      bit = bit_position(x, level_index) mod m
+      bits[bit] = 1
+
+    levels.append({bit_count: m, bits: bits})
+
+    // Compute false positives: elements in current_fp_set that hash into bits
+    new_fp_set = {}
+    for x in current_fp_set:
+      bit = bit_position(x, level_index) mod m
+      if bits[bit] == 1:
+        new_fp_set.add(x)
+
+    // Next level: encode the false positives to eliminate them
+    include_set = new_fp_set
+    current_fp_set = new_fp_set
+    level_index += 1
+
+  return levels
+```
+
+**Insertion order.** Elements MUST be inserted in ascending `entry_index` order.
+The bit array state after insertion must be deterministic given fixed inputs; any
+other ordering is non-normative.
+
+**Query algorithm:**
+
+```
+function Query(cascade, x):
+  for i, level in enumerate(cascade.levels):
+    bit = bit_position(x, i) mod level.bit_count
+    in_filter = level.bits[bit] == 1
+    if i == 0:
+      if not in_filter: return NOT_REVOKED   // definitely not in R
+      result = REVOKED                        // tentatively in R
+    else:
+      if in_filter:
+        result = NOT_REVOKED                  // this level's filter caught it: was FP
+      else:
+        return result                         // not caught: confirmed
+  return result
+```
+
+More precisely: the query result alternates interpretation at each level. Level 0
+"in filter" means "potentially revoked." Level 1 "in filter" means "Level 0 was
+a false positive — not revoked." Level 2 "in filter" means "Level 1 was a false
+positive — revoked again." And so on. If the element falls out of the cascade at
+any level (the bit is 0), the current interpretation at that level is the final
+answer. If all levels are traversed, the interpretation at the last level is the
+final answer.
+
+### Binary Encoding
+
+The cascade is serialized as follows. All integer fields are big-endian.
+
+```
+uint8   num_levels          (number of levels, 0..255)
+for each level (index 0..num_levels-1):
+  uint32  bit_count         (number of bits in this level's filter)
+  uint8   k                 (number of hash functions; always 1 in this spec)
+  ceil(bit_count/8) bytes   bit_array (MSB of first byte = bit 0)
+```
+
+Bit indexing: bit `i` of the filter is stored in byte `i/8` at bit position
+`7 - (i mod 8)` (MSB-first within each byte). Bit 0 is the most significant
+bit of byte 0.
+
+The total size of the serialized cascade is:
+`1 + num_levels * (4 + 1) + sum(ceil(bit_count_i / 8) for each level i)`
+
+An empty cascade (R is empty at construction time) is encoded as `num_levels = 0`
+(1 byte). Querying an empty cascade MUST return NOT_REVOKED for all inputs.
 
 ### Wire Format
 
-The revocation artifact is a signed note with the same structure as a checkpoint:
+The revocation artifact is a signed note with the same four-line body structure
+as a checkpoint. The body is what the issuer signature covers.
 
+**Body:**
+```
+<origin>\n
+<tree_size decimal>\n
+crlite-v1\n
+<base64(cascade_bytes)>\n
+```
+
+The `crlite-v1` literal is the artifact type identifier. Verifiers MUST reject
+artifacts with unrecognized type identifiers. `cascade_bytes` is the binary
+encoding defined above, base64-encoded per RFC 4648 §4 (standard alphabet,
+`=` padding, no line breaks).
+
+**Full signed note:**
 ```
 <origin>
-
 <tree_size decimal>
-
-<artifact_type>
-
-<filter_bytes_base64>
-
+crlite-v1
+<base64(cascade_bytes)>
 
 — <issuer_key_name> <base64(4_byte_key_hash || issuer_signature)>
 ```
 
-The body (four lines, each `
-`-terminated) is what the issuer signature covers.
-Field definitions:
+The issuer signature is computed over the four-line body (same as a checkpoint
+body) using the same key and algorithm identified in the trust configuration.
+The `issuer_key_name` and key hash derivation follow the c2sp.org/signed-note
+convention, identical to how the checkpoint issuer signature is computed.
 
-| Field | Description |
-|-------|-------------|
-| `origin` | Full UTF-8 origin string, identifying the log |
-| `tree_size` | The log's `tree_size` at artifact generation time. Entries with `entry_index >= tree_size` are not covered and MUST be treated as not-revoked by this artifact. |
-| `artifact_type` | `crlite-v1` for a full Bloom filter cascade; `crlite-v1-delta` for a delta update. |
-| `filter_bytes_base64` | Standard base64 (RFC 4648 §4) encoding of the cascade bytes. |
+Verifiers MUST verify this signature before trusting the artifact. An artifact
+with an invalid or missing signature MUST be discarded entirely.
 
-The issuer signature is over the four-line body using the same algorithm and key
-identified by `issuer_key_name` in the trust configuration. Verifiers MUST verify
-this signature before trusting the artifact. An artifact with an invalid signature
-MUST be discarded and the verifier MUST behave as if no revocation artifact is
-available (fail-closed: treat the entry as potentially revoked and decline to
-verify).
+### Trust Configuration
+
+The trust configuration MUST include a `revocation_url` field alongside
+`checkpoint_url`. Verifiers use this URL to fetch the revocation artifact.
+
+```json
+{
+  "revocation_url": "https://example.com/revoked"
+}
+```
+
+By convention, `revocation_url` is `<base_url>/revoked` where `<base_url>` is
+the same base as `checkpoint_url`. Issuers that do not support revocation SHOULD
+omit this field. Verifiers that receive a trust config without `revocation_url`
+MUST behave as if no revocation artifact is available and apply the fail-open
+or fail-closed policy per their deployment configuration.
 
 ### Distribution
 
-The artifact is served at `GET /revoked` at the same base URL as `GET /checkpoint`.
-Verifiers fetch it on the same charge-cycle schedule as checkpoint updates.
+The artifact is served at `GET /revoked` (derived from `revocation_url` in the
+trust config). Verifiers fetch it on the same charge-cycle schedule as checkpoint
+updates. The endpoint returns the full signed note as `text/plain; charset=utf-8`.
 
-**Full artifact (`GET /revoked`):** A complete Bloom filter cascade covering all
-issued non-expired entries. Verifiers that have no cached artifact, or whose
-cached artifact covers a `tree_size` more than `REVOKED_MAX_DELTA_SPAN` entries
-old, MUST fetch the full artifact.
+**Full artifact (`GET /revoked`):** A complete cascade covering all issued
+non-expired entries. This is the only format defined for v1.
 
-**Delta updates (`GET /revoked/delta/{n}`):** An additive delta encoding the
-difference between the artifact at `tree_size = n` and the current artifact.
-Since revocations are monotone — entries are never un-revoked — deltas are
-purely additive and can be applied via XOR to the corresponding cascade level,
-per the CRLite delta construction. Verifiers apply deltas in sequence from their
-last full artifact to the current `tree_size`.
-
-Issuers SHOULD publish delta updates every time a new checkpoint is published.
-Issuers SHOULD publish a new full artifact at least once per validity window
-of the shortest-lived credential they issue.
+**Delta updates** are deferred to v2. The `crlite-v1-delta` artifact type
+identifier is reserved but its format is not defined in this version. Issuers
+that need bandwidth-efficient updates in high-volume deployments SHOULD track
+the Clubcard construction (Schanck 2025) for future reference.
 
 ### Verifier Behavior
 
-At scan time, the verifier queries the locally cached revocation artifact:
+**Cache key.** The revocation cache is keyed on `full_origin` only (not
+`full_origin + tree_size`). Unlike the checkpoint cache — which caches by
+`tree_size` because old roots remain valid for old payloads — the revocation
+artifact is always superseded by newer versions. Verifiers keep the most recent
+artifact for each origin and refresh it when the issuer publishes a new checkpoint.
 
-1. If no artifact is cached, or the cached artifact's `tree_size < entry_index + 1`,
-   the entry is not covered. Verifiers MUST NOT silently pass uncovered entries.
-   The RECOMMENDED behavior is to attempt a network fetch of the artifact on
-   cache miss (same as checkpoint cache miss), and to fail-closed if the fetch
-   fails or the network is unavailable.
+**Coverage check.** If the cached artifact's `tree_size <= entry_index`, the
+entry is not covered (it was issued after the artifact was generated). Verifiers
+MUST NOT silently pass uncovered entries. The RECOMMENDED behavior is to fetch
+a fresh artifact from `revocation_url` on cache miss, exactly as the checkpoint
+is fetched on cache miss.
 
-2. If an artifact is cached and covers the entry (`tree_size > entry_index`),
-   query the cascade: if the result is "revoked", reject the entry. If the
-   result is "not revoked", proceed (accepting the false positive rate).
+**Fail-closed posture (RECOMMENDED).** If no artifact is available (not cached
+and fetch failed or network unavailable), the verifier declines to verify and
+reports the revocation check as failed. A missing artifact cannot be
+distinguished from an attacker serving an empty revocation list.
 
-3. The revocation artifact MUST be keyed on the full origin string, not
-   `origin_id`. Cache eviction and delta application MUST use `(full_origin,
-   tree_size)` as the key.
+**Fail-open posture (non-default).** Verifiers in deployments where revocation
+is best-effort MAY configure fail-open: if no artifact is available, the
+revocation check passes with a warning in the verification trace. This MUST be
+an explicit deployment configuration. The verification trace MUST clearly
+indicate that the revocation check was skipped.
 
-**Fail-closed posture.** A missing, expired, or unauthenticated revocation
-artifact means the verifier cannot confirm the entry is not revoked. Verifiers
-MUST fail-closed in this case — either attempt a network fetch or decline to
-verify the payload. Silently skipping the revocation check when no artifact
-is available is NOT permitted in security-critical deployments.
+**Query.** Given a cached artifact covering `entry_index`:
+1. Decode the base64 cascade bytes.
+2. Verify the issuer signature over the four-line body.
+3. Call `Query(cascade, entry_index)`.
+4. If `REVOKED`, reject the payload.
+5. If `NOT_REVOKED`, proceed.
 
-**Fail-open option for low-security deployments.** Verifiers in deployments
-where revocation is a best-effort concern (not a hard security requirement) MAY
-configure a fail-open posture for the revocation step. This MUST be an explicit
-deployment configuration, not a default. The verification trace MUST indicate
-that the revocation check was skipped due to missing artifact.
+Step 2 MUST be performed on every use of a cached artifact, not only at load
+time, to prevent tampering with a cached artifact in memory.
 
 ### Size Estimates
 
-For a log with 10,000 issued entries and 100 revocations (1% revocation rate):
+These are computed from the normative construction parameters above.
 
-| Artifact | Estimated size |
-|---------|--------------|
-| Full Bloom cascade | ~200 bytes |
-| Delta (100 new revocations) | ~150 bytes |
+For `n` revoked entries at `BITS_PER_ELEMENT = 1.44`, the Level 0 filter is
+approximately `1.44 × n` bits. Subsequent levels are much smaller (encoding
+only the false positive set, which shrinks rapidly). Total cascade size is
+approximately `1.44 × n / 8` bytes plus a small constant per level.
 
-For a log with 1,000,000 issued entries and 10,000 revocations (1% revocation rate):
-
-| Artifact | Estimated size |
-|---------|--------------|
-| Full Bloom cascade | ~18 KB |
-| Full Clubcard (issuer-partitioned) | ~8 KB |
-| 6-hour delta | ~1–2 KB |
-
-These are well within the charge-cycle bandwidth budget. The WebPKI CRLite
-deployment (900 million certificates, 8 million revoked) requires 6.7 MB for a
-full Clubcard artifact and 26.8 KB per 6-hour delta. MTA-QR issuers operate at
-orders of magnitude smaller scale.
+| Revoked entries | Approximate full cascade |
+|----------------|--------------------------|
+| 10 | ~64 bytes (minimum filter size dominates) |
+| 100 | ~200 bytes |
+| 1,000 | ~1.8 KB |
+| 10,000 | ~18 KB |
+| 100,000 | ~180 KB |
 
 ### References
 
@@ -1342,8 +1460,8 @@ orders of magnitude smaller scale.
   https://research.mozilla.org/files/2025/04/clubcards_for_the_webpki.pdf
 - Mozilla CRLite reference implementation (MPL-2.0):
   https://github.com/mozilla/crlite
-- Mozilla Clubcard library (MPL-2.0):
-  https://github.com/mozilla/clubcard
+- Mozilla rust-cascade library (MPL-2.0):
+  https://github.com/mozilla/rust-cascade
 
 ---
 

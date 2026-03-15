@@ -516,19 +516,46 @@ honestly.
 
 ### Steps that are legitimately stubbed in the reference implementation
 
-**Revocation (step 9):** the revocation format is now defined in SPEC.md §Revocation
-(Bloom filter cascade, modeled on CRLite). The reference implementations still stub
-this step. The correct stub emits a visible trace step rather than silently skipping:
+**Revocation (step 9):** the revocation protocol is fully specified in SPEC.md §Revocation.
+The reference implementations still stub this step. The correct stub:
 
 ```
 add("Revocation check", true, "not implemented — no revocation list defined")
 ```
 
-When implementing: fetch the signed cascade from `GET /revoked` on the charge-cycle
-schedule alongside the checkpoint. Verify the issuer signature over the cascade body
-(same key as checkpoint). At scan time, query the locally cached cascade against
-`entry_index`. Fail-closed if no artifact is cached. See SPEC.md §Revocation and
-github.com/mozilla/crlite for the cascade construction reference implementation.
+**When implementing the cascade construction:**
+
+The construction must be deterministic. Four things must be identical across all
+implementations or your test vectors will fail:
+
+1. **Element encoding:** `entry_index` as 8-byte big-endian unsigned integer.
+2. **Hash function:** `bit_position(x, i) = big_endian_uint64(SHA-256(x || uint8(i))[0:8]) mod m`
+   where `x` is the 8-byte element and `i` is the level index (0-based).
+3. **Bit array size:** `m = max(ceil(n * 1.44), 64)` rounded up to the nearest
+   multiple of 8. Fixed constant `BITS_PER_ELEMENT = 1.44`.
+4. **Insertion order:** ascending `entry_index` within each level.
+
+**Bit encoding:** bit `i` is stored in byte `i/8` at bit position `7 - (i mod 8)` (MSB-first).
+
+**The cascade query alternates interpretation at each level:**
+Level 0 in-filter → tentatively revoked. Level 1 in-filter → false positive, not revoked.
+Level 2 in-filter → false positive of the false positive, revoked again. And so on.
+If any level's bit is 0, return the current interpretation immediately.
+
+**Binary format header per level:** `uint32 bit_count | uint8 k | bit_array bytes`
+(big-endian). Preceded by `uint8 num_levels`.
+
+**Common implementation mistakes:**
+
+- Using little-endian for the element encoding or the bit_count field
+- Off-by-one in the bit array size formula (ceil vs floor)
+- Inserting elements in hash order rather than ascending index order
+- Misimplementing the MSB-first bit encoding (e.g., using LSB-first)
+- Getting the query alternation wrong (inverting the logic at odd levels)
+
+Generate the Go implementation first, emit the test vector bytes from it,
+then verify those exact bytes are reproduced by each other language.
+See SPEC.md §Revocation for the full normative construction.
 
 **Mode 0:** implement explicit rejection. A Mode 0 payload passed to a Mode 1
 verifier must return a clear error, not silently fall through to the network
