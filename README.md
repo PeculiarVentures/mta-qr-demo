@@ -168,7 +168,9 @@ These are genuine gaps that should be addressed before production use. They are 
 
 **SPEC.md does not describe Mode 2 tile addressing.** The spec covers the payload binary format and trust config schema but does not define the tile server API, tile addressing scheme, or tile verification algorithm needed to complete a Mode 2 deployment.
 
-**Browser demo SDK bundle is not committed.** `browser-demo/deps/mta_qr_sdk.iife.js` is built by CI from `ts/src/browser-bundle.ts` via esbuild and not checked in. If the CI workflow is not yet wired to the GitHub Pages deployment step, the demo may serve a stale bundle.
+**Browser demo SDK bundle is not committed as a source artifact.** `browser-demo/deps/mta_qr_sdk.iife.js` is committed as a convenience snapshot but CI rebuilds it from `ts/sdk/src/browser-bundle.ts` on every push. The committed copy may be slightly stale between pushes; the CI-built version is authoritative.
+
+**`interop_test.py` covers only Go and TypeScript HTTP services.** The Rust and Java SDK interop matrix runs via `cargo test` and `mvn test`. Extending `interop_test.py` to include Rust and Java requires wrapping those SDKs in HTTP server binaries with the same `/issue`, `/verify`, and `/trust-config` endpoints as the existing Go and TypeScript services.
 
 ---
 

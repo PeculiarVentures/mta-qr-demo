@@ -6,11 +6,13 @@ This document describes the code structure of `mta-qr-demo`, the design decision
 
 ## Overview
 
-The repository contains eight services (six issuers + two verifiers) sharing a common protocol layer:
+The repository contains two layers: HTTP services (Go and TypeScript) for running live issuers and verifiers, and standalone SDK libraries (Go, TypeScript, Rust, Java) that implement the full protocol without an HTTP layer.
+
+### HTTP services
 
 ```
                         test-vectors/vectors.json
-                        browser-demo/index.html  ← standalone browser implementation
+                        browser-demo/  ← browser demo (built from ts/sdk/)
                                │
               ┌────────────────┴────────────────┐
               │                                 │
@@ -26,11 +28,28 @@ go/issuer (×3)      go/verifier  ts/issuer (×3)      ts/verifier
 :8085 ML-DSA-44                   :3005 ML-DSA-44
 ```
 
-The two shared libraries are independently implemented and independently tested against the same canonical fixtures. The interop test then confirms that any payload produced by any issuer verifies correctly with any verifier.
+The two shared libraries are independently implemented and tested against the same canonical fixtures. The interop test confirms that any payload produced by any issuer verifies correctly with any verifier.
+
+### SDK libraries
+
+Four standalone libraries implementing the same protocol without HTTP:
+
+| Directory | Language | Issuer | Verifier | Signers |
+|-----------|----------|:------:|:--------:|---------|
+| `ts/sdk/` | TypeScript | ✓ | ✓ | Local (Ed25519, ECDSA P-256, ML-DSA-44), GoodKey |
+| `rust/`   | Rust       | ✓ | ✓ | Local (Ed25519, ECDSA P-256, ML-DSA-44), GoodKey |
+| `java/`   | Java       | ✓ | ✓ | Local (Ed25519, ECDSA P-256, ML-DSA-44), GoodKey |
+| `go/` (SDK portion) | Go | ✓ | ✓ | Local (Ed25519, ECDSA P-256, ML-DSA-44), GoodKey |
+
+The SDKs share no code with the HTTP services. They use injectable signers and note providers, making them suitable for embedded use, testing, and environments without network access. All four pass a 96-cell cross-language interop matrix (4 issuers × 4 verifiers × 3 algorithms × 2 payload modes).
+
+The TypeScript SDK (`ts/sdk/`) also provides a browser bundle entry point (`src/browser-bundle.ts`) compiled by esbuild into `browser-demo/deps/mta_qr_sdk.iife.js`, which the browser demo uses in place of inline protocol code.
 
 ---
 
-## Protocol layer (`go/shared/`, `ts/shared/`)
+## Protocol layer
+
+The Go HTTP service uses `go/shared/`. The TypeScript HTTP service uses `ts/shared/`. The SDK libraries each contain equivalent implementations inline. All implementations are independently derived and verified against the same canonical test vectors.
 
 ### merkle
 
@@ -224,9 +243,15 @@ See [`test-vectors/README.md`](test-vectors/README.md) for the format and how to
 
 Builds Go binaries, starts all services as subprocesses, runs the 12-cell positive matrix (3 algorithms × 4 impl pairs) plus 3 negative tests, prints per-step traces, exits 0 on 15/15.
 
-`browser-demo/index.html` — self-contained single-file browser demo, no build step, no server. Same tiled tree structure and wire format as Go/TS.
+Uses `MTA_PORT`, `MTA_ORIGIN`, and `MTA_SIG_ALG` environment variables to start multiple instances of the same binary with different configurations. Each algorithm variant gets a distinct origin string to avoid checkpoint cache collisions.
 
-Uses `MTA_PORT`, `MTA_ORIGIN`, and `MTA_SIG_ALG` environment variables to start multiple instances of the same binary with different configurations. Each algorithm variant gets a distinct origin string to avoid the checkpoint cache collision.
+**Coverage note:** `interop_test.py` covers only the Go and TypeScript HTTP services. The Rust and Java SDK interop matrix (96 cells: 4 issuers × 4 verifiers × 3 algorithms × 2 modes) runs via `cargo test` and `mvn test` in their respective directories. Extending `interop_test.py` to cover Rust and Java requires wrapping those SDKs in HTTP servers.
+
+### Browser demo (`browser-demo/`)
+
+`browser-demo/index.html` is a self-contained browser implementation built from `browser-demo/index.template.html` by `browser-demo/build.py`. The build script injects three JavaScript bundles — nayuki QR encoder, noble post-quantum, and the MTA-QR SDK (`mta_qr_sdk.iife.js`) — into placeholder comments in the template.
+
+The SDK bundle is compiled from `ts/sdk/src/browser-bundle.ts` by esbuild. CI rebuilds it from source on every push; the committed copy in `browser-demo/deps/` is a convenience snapshot. Both Mode 1 (proof embedded) and Mode 2 (proof deferred) work in-browser for Ed25519 and ML-DSA-44.
 
 ---
 
@@ -273,26 +298,38 @@ These are the only available FIPS 204 implementations for their respective platf
 
 1. **Register a `sig_alg` value** in the spec table (SPEC.md Cryptography section). Requires a C2SP note signature type registration for full interoperability.
 
-2. **Implement in Go** (`go/shared/signing/`):
+2. **Implement in the Go HTTP service** (`go/shared/signing/`):
    - Add a `<alg>.go` file with a struct implementing `signing.Signer`
    - Add the `sig_alg` constant to `signing.go`
    - Add a `case` in `Verify()`, `SigLen()`, `PubKeyLen()`, and `SigAlgName()`
 
-3. **Implement in TypeScript** (`ts/shared/signing.ts`):
+3. **Implement in the TypeScript HTTP service** (`ts/shared/signing.ts`):
    - Add a `SIG_ALG_*` constant
    - Add factory functions (`<alg>FromSeed(...)`, `new<Alg>()`) implementing `Signer`
    - Include a `keyName` field in the returned `Signer` — this is how verifiers identify the issuer's signature line in note format
    - Add a `case` in `verify()`, `sigLen()`, and `sigAlgName()`
 
-4. **Add test vectors** (`test-vectors/vectors.json`):
-   - A `signing-<alg>` vector with: fixed key material, a fixed message (use the checkpoint body from `checkpoint-body-v1`), the expected public key, and for deterministic algorithms the expected signature
-   - For randomized algorithms (ECDSA-family): include a `pre_recorded_sig` produced by the reference implementation for cross-impl verify testing
-   - Both Go and TypeScript test suites must load and pass this vector
+4. **Implement in the TypeScript SDK** (`ts/sdk/src/signers/local.ts`, `ts/sdk/src/verify-sig.ts`):
+   - Add a `local<Alg>()` factory function in `local.ts`
+   - Add a `case` in the `verifySig()` dispatch in `verify-sig.ts`
 
-5. **Add to the issuer** (`go/issuer/main.go`, `ts/issuer/main.ts`):
+5. **Implement in Rust** (`rust/src/signers/local.rs`, `rust/src/signing/verify.rs`):
+   - Add a `LocalSigner::<alg>()` constructor in `local.rs`
+   - Add a `case` in the `verify()` dispatch in `verify.rs`
+
+6. **Implement in Java** (`java/src/main/java/.../signers/LocalSigner.java`, `.../signing/SignatureVerifier.java`):
+   - Add a `LocalSigner.<alg>(byte[] seed)` factory method
+   - Add a `case` in `SignatureVerifier.verify()`
+
+7. **Add test vectors** (`test-vectors/vectors.json`):
+   - A `signing-<alg>` vector with: fixed key material, a fixed message, the expected public key, and for deterministic algorithms the expected signature
+   - For randomized algorithms (ECDSA-family): include a `pre_recorded_sig` produced by the reference implementation for cross-impl verify testing
+   - All four test suites must load and pass this vector
+
+8. **Add to the HTTP service issuers** (`go/issuer/main.go`, `ts/issuer/main.ts`):
    - Add a case in the `MTA_SIG_ALG` env-var switch
 
-6. **Add to the interop matrix** (`interop_test.py`):
+9. **Add to the interop matrix** (`interop_test.py`):
    - Add two service entries (one Go, one TS) with distinct origins encoding the algorithm
    - Add four positive cells (Go→Go, TS→TS, Go→TS, TS→Go)
    - Add to `docker-compose.yml` with `MTA_BASE_URL` set to the container's own service name and port
