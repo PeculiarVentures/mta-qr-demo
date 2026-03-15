@@ -702,11 +702,17 @@ level is even (left child) or odd (right child) respectively.
 
 ## Verification Modes
 
-### Mode 0: Embedded (Fully Offline)
+### Mode 0: Embedded (No Checkpoint Fetch)
 
 The QR payload includes the assertion content, inclusion proof, and a compact
-cosigned checkpoint — root hash, issuer signature, and witness cosignatures. No
-network access required at verification time.
+cosigned checkpoint — root hash, issuer signature, and witness cosignatures.
+No network access is required at verification time, and no separate
+checkpoint endpoint needs to be reachable.
+
+**A trust configuration is still required.** The embedded signatures cannot
+be verified without the issuer's public key and witness public keys. These
+must be distributed out-of-band as a trust configuration before scanning.
+Mode 0 eliminates the checkpoint fetch, not the trust distribution step.
 
 **Mode 0 signed content.** The `issuer_sig` field is a note signature over the
 checkpoint body, reconstructed from the payload fields as:
@@ -747,9 +753,11 @@ MUST use the same `root_hash` bytes for both operations.
 | 2× witness cosignature (76 bytes each) | 152 |
 | **Total** | **~1,302** |
 
-**Best for:** Classical issuers (ECDSA P-256, Ed25519) in any deployment
-requiring fully offline verification — start here. PQC Mode 0 with FN-DSA-512
-requires controlled print and scan conditions.
+**Best for:** Deployments where the issuer's checkpoint endpoint may be
+unreachable at scan time, or where payloads must be independently verifiable
+without a live backend service. Classical issuers (ECDSA P-256, Ed25519)
+keep the payload size manageable. PQC Mode 0 with FN-DSA-512 adds up to 666
+bytes for the issuer signature and requires controlled print and scan conditions.
 
 ### Mode 1: Cached Checkpoint (Offline After Prefetch)
 
@@ -898,6 +906,67 @@ Expiry grace period: verifiers SHOULD apply 10 minutes (600 seconds) to account
 for unsynchronized clocks in offline deployments. Verifiers MUST NOT apply a
 grace period greater than 10 minutes. Issuers SHOULD NOT issue assertions with
 validity windows shorter than twice the configured grace period.
+
+---
+
+## Verification Flow (Mode 0)
+
+Mode 0 verification follows the same structure as Mode 1 but replaces the
+checkpoint fetch step with verification of the embedded checkpoint fields.
+
+**Prerequisites.** A trust configuration for the origin must be pre-loaded.
+The embedded signatures are verified using the issuer public key and witness
+public keys from that trust configuration. Mode 0 does not eliminate the
+trust distribution requirement — it only eliminates the checkpoint fetch.
+
+```
+1.  Decode MTAQRPayload binary.
+
+2.  Reject entry_index == 0 immediately.
+
+3.  If self_describing=1: read origin from envelope. Look up trust anchor by
+    origin_id. MUST verify envelope origin == trust config origin. If
+    self_describing=0: look up trust anchor by origin_id.
+
+4.  Verify sig_alg in payload == sig_alg in trust config for this origin.
+    Reject on mismatch (downgrade attack prevention).
+
+5.  Reconstruct the checkpoint body from the embedded fields:
+
+      <origin> + "\n" + decimal(tree_size) + "\n" + base64(root_hash) + "\n"
+
+    where <origin> is the full origin string from the trust configuration
+    (not the origin_id, and not a truncated form).
+
+6.  Verify issuer_sig over the reconstructed checkpoint body using the
+    algorithm identified by sig_alg in the trust configuration — never
+    inferred from signature byte length. Reject on failure.
+
+7.  Verify >= N distinct WitnessCosig entries using witness public keys from
+    the trust configuration, where N is witness_quorum. Each cosignature is
+    verified against the cosignature/v1 message format using the reconstructed
+    checkpoint body and the cosig.timestamp field. Ignore cosignatures from
+    key_ids not present in the trust configuration. Reject duplicate key_ids.
+    Quorum count MUST be over distinct trusted keys only.
+
+8.  Compute entry_hash = SHA-256(0x00 || tbs).
+
+9.  Verify tiled two-phase Merkle inclusion proof against root_hash using the
+    same algorithm as Mode 1 steps 8a–8b. The root_hash from the payload is
+    the expected value; it has already been authenticated in steps 6–7.
+
+10. Check entry_index not in revoked ranges for this full_origin.
+
+11. Check expiry: expiry_time MUST be > (current_time - grace_period).
+
+12. Decode entry_type_byte and proceed as in Mode 1 steps 11–12.
+```
+
+**Key difference from Mode 1:** Steps 5–7 replace the checkpoint cache lookup
+and conditional fetch (Mode 1 steps 5–6e). In Mode 0 the checkpoint
+authenticity is established by verifying the embedded signatures directly
+against the trust configuration rather than by fetching a signed note from
+a network endpoint.
 
 ---
 
