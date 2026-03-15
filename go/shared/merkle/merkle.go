@@ -8,6 +8,7 @@ package merkle
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 )
@@ -145,10 +146,9 @@ func VerifyInclusion(entryHash []byte, entryIndex, treeSize int, proof [][]byte,
 		size = (size + 1) / 2
 	}
 
-	computed := fmt.Sprintf("%x", node)
-	expected := fmt.Sprintf("%x", expectedRoot)
-	if computed != expected {
-		return fmt.Errorf("merkle: root mismatch: computed %s, expected %s", computed, expected)
+	// subtle.ConstantTimeCompare prevents timing side-channels on the root hash.
+	if subtle.ConstantTimeCompare(node, expectedRoot) != 1 {
+		return fmt.Errorf("merkle: root mismatch: computed %x, expected %x", node, expectedRoot)
 	}
 	return nil
 }

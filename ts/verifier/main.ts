@@ -28,6 +28,8 @@ interface TrustAnchor {
 const anchors = new Map<string, TrustAnchor>(); // keyed by origin_id hex
 
 // Checkpoint cache: "origin:treeSize" → rootHash
+// Bounded to prevent memory exhaustion from payloads with incrementing tree_size.
+const MAX_CACHE_ENTRIES = 1000;
 const checkpointCache = new Map<string, { rootHash: Uint8Array; fetchedAt: number }>();
 
 // --- Verification ---
@@ -104,6 +106,9 @@ async function verify(payloadBytes: Uint8Array): Promise<VerifyResult> {
     add("Checkpoint fetch+verify", true,
       `issuer sig ✓ · ${anchor.witnessQuorum}/${anchor.witnessQuorum} witnesses ✓ · tree_size=${fetchedSize}`);
     rootHash = fetchedRoot;
+    if (checkpointCache.size >= MAX_CACHE_ENTRIES) {
+      checkpointCache.delete(checkpointCache.keys().next().value!);
+    }
     checkpointCache.set(cacheKey, { rootHash: fetchedRoot, fetchedAt: Date.now() });
   }
 
@@ -296,10 +301,18 @@ const server = createServer(async (req, res) => {
       keyID: new Uint8Array(Buffer.from(w.key_id_hex, "hex")),
       pubKey: new Uint8Array(Buffer.from(w.pub_key_hex, "hex")),
     }));
+    const witnessQuorum = tc.witness_quorum;
+    if (!Number.isInteger(witnessQuorum) || witnessQuorum < 1) {
+      return json(res, { ok: false, error: `witness_quorum must be >= 1, got ${witnessQuorum}` }, 400);
+    }
+    if (witnessQuorum > witnesses.length) {
+      return json(res, { ok: false,
+        error: `witness_quorum (${witnessQuorum}) exceeds witness count (${witnesses.length})` }, 400);
+    }
     const anchor: TrustAnchor = {
       origin: tc.origin, originID: oid, issuerPubKey,
       issuerKeyName: tc.issuer_key_name ?? "",
-      sigAlg: tc.sig_alg, witnessQuorum: tc.witness_quorum,
+      sigAlg: tc.sig_alg, witnessQuorum,
       witnesses, checkpointURL: tc.checkpoint_url,
     };
     anchors.set(oid.toString(16).padStart(16, "0"), anchor);

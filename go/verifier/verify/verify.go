@@ -68,18 +68,22 @@ type Result struct {
 	SchemaID     uint64         `json:"schema_id"`
 }
 
+const maxCacheEntries = 1000
+
 // Verifier holds trust anchors and a checkpoint cache.
 type Verifier struct {
-	mu      sync.RWMutex
-	anchors map[uint64]*TrustAnchor
-	cache   map[string]*CachedCheckpoint
+	mu         sync.RWMutex
+	anchors    map[uint64]*TrustAnchor
+	cache      map[string]*CachedCheckpoint
+	cacheOrder []string // insertion order for LRU eviction
 }
 
 // New creates an empty Verifier.
 func New() *Verifier {
 	return &Verifier{
-		anchors: make(map[uint64]*TrustAnchor),
-		cache:   make(map[string]*CachedCheckpoint),
+		anchors:    make(map[uint64]*TrustAnchor),
+		cache:      make(map[string]*CachedCheckpoint),
+		cacheOrder: make([]string, 0, maxCacheEntries+1),
 	}
 }
 
@@ -180,6 +184,13 @@ func (v *Verifier) Verify(payloadBytes []byte) *Result {
 			anchor.WitnessQuorum, anchor.WitnessQuorum, fetchedSize))
 		rootHash = fetchedRoot
 		v.mu.Lock()
+		if _, exists := v.cache[cacheKey]; !exists {
+			if len(v.cacheOrder) >= maxCacheEntries {
+				delete(v.cache, v.cacheOrder[0])
+				v.cacheOrder = v.cacheOrder[1:]
+			}
+			v.cacheOrder = append(v.cacheOrder, cacheKey)
+		}
 		v.cache[cacheKey] = &CachedCheckpoint{TreeSize: fetchedSize, RootHash: fetchedRoot, FetchedAt: time.Now()}
 		v.mu.Unlock()
 	}
