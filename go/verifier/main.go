@@ -142,6 +142,8 @@ type trustConfigJSON struct {
 	SigAlg        uint8  `json:"sig_alg"`
 	WitnessQuorum int    `json:"witness_quorum"`
 	CheckpointURL string `json:"checkpoint_url"`
+	RevocationURL string `json:"revocation_url"`
+	BatchSize     int    `json:"batch_size"`
 	Witnesses     []struct {
 		Name   string `json:"name"`
 		KeyID  string `json:"key_id_hex"`
@@ -180,11 +182,14 @@ func loadTrustConfigFromBytes(body []byte) error {
 	if tc.WitnessQuorum > len(witnesses) {
 		return fmt.Errorf("witness_quorum (%d) exceeds witness count (%d)", tc.WitnessQuorum, len(witnesses))
 	}
+	batchSize := tc.BatchSize
+	if batchSize <= 0 { batchSize = 16 }
 	if err := v.AddAnchor(&verify.TrustAnchor{
 		Origin: tc.Origin, OriginID: originIDInt, IssuerPubKey: issuerPubBytes,
 		IssuerKeyName: tc.IssuerKeyName,
 		SigAlg: tc.SigAlg, WitnessQuorum: tc.WitnessQuorum,
 		Witnesses: witnesses, CheckpointURL: tc.CheckpointURL,
+		RevocationURL: tc.RevocationURL, BatchSize: batchSize,
 	}); err != nil {
 		return fmt.Errorf("add anchor: %w", err)
 	}

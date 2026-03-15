@@ -14,7 +14,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
-const BATCH_SIZE: usize = 16;
+// BATCH_SIZE is read from trust.batch_size at verification time (see Verifier::verify)
 const GRACE:      u64   = 600;
 
 /// The result of a successful verification.
@@ -202,11 +202,12 @@ impl Verifier {
         } else {
             // Mode 1 (cached): two-phase tiled Merkle proof embedded.
             let global_idx   = p.entry_index as usize;
-            let inner_idx    = global_idx % BATCH_SIZE;
-            let batch_idx    = global_idx / BATCH_SIZE;
-            let num_batches  = (p.tree_size as usize + BATCH_SIZE - 1) / BATCH_SIZE;
-            let batch_start  = batch_idx * BATCH_SIZE;
-            let this_batch_sz = BATCH_SIZE.min(p.tree_size as usize - batch_start);
+            let batch_size   = self.trust.batch_size;
+            let inner_idx    = global_idx % batch_size;
+            let batch_idx    = global_idx / batch_size;
+            let num_batches  = (p.tree_size as usize + batch_size - 1) / batch_size;
+            let batch_start  = batch_idx * batch_size;
+            let this_batch_sz = batch_size.min(p.tree_size as usize - batch_start);
 
             let inner_proof: Vec<_> = p.proof_hashes[..p.inner_count as usize].to_vec();
             let outer_proof: Vec<_> = p.proof_hashes[p.inner_count as usize..].to_vec();
@@ -236,10 +237,13 @@ impl Verifier {
         };
         add!(true, "cbor decode", format!("schema_id={schema_id} issued={issued_at} expires={expires_at}"));
 
-        // 10. Revocation check — not yet implemented.
-        // The spec defines revocation by index range but GET /revoked format
-        // and authentication are not yet defined. Documented stub.
-        add!(true, "revocation check", "not implemented — no revocation list defined yet");
+        // 10. Revocation check.
+        // The revocation protocol is fully specified in SPEC.md §Revocation:
+        // a Bloom filter cascade over revoked/valid entry indices, signed with
+        // the issuer key, served at GET /revoked (self.trust.revocation_url).
+        // TODO: implement cascade fetch, cache, staleness check, and query.
+        // Fail-open is NOT the correct default. See issue #14.
+        add!(false, "revocation check", "not implemented — stub only, revocation not checked");
 
         // 11. Expiry
         let now = std::time::SystemTime::now()

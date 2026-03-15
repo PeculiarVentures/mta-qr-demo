@@ -123,10 +123,10 @@ public final class Verifier {
 
     // --- internals ---
 
-    private static final int BATCH_SIZE = 16;
     private static final int GRACE      = 600; // seconds
 
     private final TrustConfig  trust;
+    private final int batchSize; // read from trust.batchSize at construction
     private final HttpClient   httpClient;
     private final NoteProvider noteProvider;
     private static final int MAX_CACHE_ENTRIES = 1000;
@@ -142,6 +142,7 @@ public final class Verifier {
 
     private Verifier(TrustConfig trust, HttpClient httpClient, NoteProvider noteProvider) {
         this.trust        = trust;
+        this.batchSize    = trust.batchSize > 0 ? trust.batchSize : 16;
         this.httpClient   = httpClient;
         this.noteProvider = noteProvider;
     }
@@ -256,11 +257,11 @@ public final class Verifier {
         } else {
             // Mode 1 (cached): two-phase tiled Merkle proof embedded.
             int globalIdx   = (int) p.entryIndex;
-            int innerIdx    = globalIdx % BATCH_SIZE;
-            int batchIdx    = globalIdx / BATCH_SIZE;
-            int numBatches  = ((int) p.treeSize + BATCH_SIZE - 1) / BATCH_SIZE;
-            int batchStart  = batchIdx * BATCH_SIZE;
-            int thisBatchSz = Math.min(BATCH_SIZE, (int) p.treeSize - batchStart);
+            int innerIdx    = globalIdx % batchSize;
+            int batchIdx    = globalIdx / batchSize;
+            int numBatches  = ((int) p.treeSize + batchSize - 1) / batchSize;
+            int batchStart  = batchIdx * batchSize;
+            int thisBatchSz = Math.min(batchSize, (int) p.treeSize - batchStart);
 
             List<byte[]> innerProof = p.proofHashes.subList(0, p.innerCount);
             List<byte[]> outerProof = p.proofHashes.subList(p.innerCount, p.proofHashes.size());
@@ -312,9 +313,12 @@ public final class Verifier {
             "schema_id=" + schemaId + " issued=" + issuedAt + " expires=" + expiresAt));
 
         // Revocation check — not yet implemented.
-        // The spec defines revocation by index range but GET /revoked format
-        // and authentication are not yet defined. Documented stub.
-        steps.add(new Step("revocation check", true, "not implemented — no revocation list defined yet"));
+        // The revocation protocol is fully specified in SPEC.md §Revocation:
+        // a Bloom filter cascade over revoked/valid entry indices, signed with
+        // the issuer key, served at GET /revoked (trust.revocationUrl).
+        // TODO: implement cascade fetch, cache, staleness check, and query.
+        // Fail-open is NOT the correct default. See issue #14.
+        steps.add(new Step("revocation check", false, "not implemented — stub only, revocation not checked"));
 
         // Expiry
         long now = Instant.now().getEpochSecond();

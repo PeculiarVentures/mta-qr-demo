@@ -27,6 +27,8 @@ pub struct TrustConfig {
     pub witness_quorum:  usize,
     pub witnesses:       Vec<WitnessEntry>,
     pub checkpoint_url:  String,
+    pub revocation_url:  String,  // empty string if issuer omits revocation_url
+    pub batch_size:      usize,   // from trust config; defaults to 16
 }
 
 // Raw JSON shape matching the issuer's /trust-config endpoint
@@ -39,6 +41,10 @@ struct TrustConfigJSON {
     sig_alg:            u8,
     witness_quorum:     usize,
     checkpoint_url:     String,
+    #[serde(default)]
+    revocation_url:     String,
+    #[serde(default)]
+    batch_size:         Option<usize>,
     witnesses:          Vec<WitnessJSON>,
 }
 
@@ -97,6 +103,8 @@ impl TrustConfig {
                 raw.witness_quorum, witnesses.len()
             ));
         }
+        let batch_size = raw.batch_size.unwrap_or(0);
+        let batch_size = if batch_size > 0 { batch_size } else { 16 };
         Ok(Self {
             origin: raw.origin,
             origin_id,
@@ -106,6 +114,8 @@ impl TrustConfig {
             witness_quorum: raw.witness_quorum,
             witnesses,
             checkpoint_url: raw.checkpoint_url,
+            revocation_url: raw.revocation_url,
+            batch_size,
         })
     }
 }
