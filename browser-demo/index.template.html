@@ -28,9 +28,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MTA-QR · In-Browser Demo</title>
 <style>
-  /* Google Fonts — remove this @import for fully offline use.
-   * DM Sans → system-ui  |  JetBrains Mono → ui-monospace / Consolas */
-  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:ital@0;1&display=swap');
+  /* Fonts: uses system-ui and ui-monospace (fully offline, no external requests).
+   * DM Sans → system-ui  |  JetBrains Mono → ui-monospace / Consolas / monospace */
 
   :root {
     --navy:           #1B2838;
@@ -61,8 +60,8 @@
     --color-warn:     #f59e0b;
     --color-err:      #ef4444;
     --color-ok:       #10b981;
-    --font-mono:      'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
-    --font-sans:      'DM Sans', system-ui, -apple-system, sans-serif;
+    --font-mono:      ui-monospace, 'Fira Code', 'Consolas', monospace;
+    --font-sans:      system-ui, -apple-system, sans-serif;
     --radius:         0.75rem;
   }
 
