@@ -370,19 +370,20 @@ impl Verifier {
 
 // --- payload decoding ---
 
-struct DecodedPayload {
-    mode:         u8,
-    sig_alg:      u8,
-    origin_id:    u64,
-    tree_size:    u64,
-    entry_index:  u64,
-    origin:       Option<String>,
-    proof_hashes: Vec<Vec<u8>>,
-    inner_count:  u8,
-    tbs:          Vec<u8>,
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct DecodedPayload {
+    pub(crate) mode:         u8,
+    pub(crate) sig_alg:      u8,
+    pub(crate) origin_id:    u64,
+    pub(crate) tree_size:    u64,
+    pub(crate) entry_index:  u64,
+    pub(crate) origin:       Option<String>,
+    pub(crate) proof_hashes: Vec<Vec<u8>>,
+    pub(crate) inner_count:  u8,
+    pub(crate) tbs:          Vec<u8>,
 }
 
-fn decode_payload(data: &[u8]) -> Result<DecodedPayload> {
+pub(crate) fn decode_payload(data: &[u8]) -> Result<DecodedPayload> {
     let mut pos = 0;
     let read_byte = |pos: &mut usize| -> Result<u8> {
         if *pos >= data.len() { return Err(anyhow!("unexpected end at offset {pos}")); }
@@ -486,4 +487,19 @@ fn extract_u64(v: &ciborium::Value) -> Result<u64> {
 fn last_field_base64(line: &str) -> Option<Vec<u8>> {
     let idx = line.rfind(' ')?;
     B64.decode(line[idx + 1..].trim()).ok()
+}
+
+/// Test-accessible wrapper for decode_payload.
+#[cfg(test)]
+pub(crate) fn decode_payload_pub(data: &[u8]) -> Result<DecodedPayload> {
+    decode_payload(data)
+}
+
+/// Test-accessible wrapper for verify_inclusion (via issuer module).
+#[cfg(test)]
+pub(crate) fn verify_inclusion_pub(
+    leaf_hash: &[u8], idx: usize, tree_size: usize,
+    proof: &[Vec<u8>], expected_root: &[u8],
+) -> anyhow::Result<()> {
+    crate::issuer::verify_inclusion(leaf_hash, idx, tree_size, proof, expected_root)
 }

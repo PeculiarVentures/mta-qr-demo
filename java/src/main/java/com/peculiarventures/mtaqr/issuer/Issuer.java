@@ -318,6 +318,18 @@ public final class Issuer {
 
     // --- Merkle tree ---
 
+    // Test-accessible primitive helpers.
+    // These methods are package-private to keep them out of the public API.
+    // Tests in the same package (src/test/...) can call them directly.
+    public static byte[] hashLeafForTest(byte[] data)  { return hashLeaf(data); }
+    public static byte[] hashNodeForTest(byte[] l, byte[] r) { return hashNode(l, r); }
+    public static byte[] entryHashForTest(byte[] tbs) { return entryHash(tbs); }
+    public static byte[] encodeTbsForTest(long issuedAt, long expiresAt, long schemaId, Map<String, Object> claims) {
+        // Temporarily swap schemaId since encodeTbs uses the instance field
+        // We need a standalone version — delegate to the internal CBOR logic.
+        return encodeTbsStatic(issuedAt, expiresAt, schemaId, claims);
+    }
+
     private static byte[] entryHash(byte[] tbs) {
         return hashLeaf(tbs);
     }
@@ -449,6 +461,26 @@ public final class Issuer {
 
     // --- CBOR TBS encoding ---
     // Minimal deterministic CBOR: map with integer keys 2, 3, 4
+
+    // Static version for test helpers (takes explicit schemaId).
+    public static byte[] encodeTbsStatic(long issuedAt, long expiresAt, long schemaId, Map<String, Object> claims) {
+        com.upokecenter.cbor.CBORObject map = com.upokecenter.cbor.CBORObject.NewOrderedMap();
+        com.upokecenter.cbor.CBORObject times = com.upokecenter.cbor.CBORObject.NewArray();
+        times.Add(issuedAt); times.Add(expiresAt);
+        map.set(com.upokecenter.cbor.CBORObject.FromObject(2), times);
+        map.set(com.upokecenter.cbor.CBORObject.FromObject(3), com.upokecenter.cbor.CBORObject.FromObject(schemaId));
+        com.upokecenter.cbor.CBORObject claimsMap = com.upokecenter.cbor.CBORObject.NewOrderedMap();
+        for (Map.Entry<String, Object> e : claims.entrySet()) {
+            claimsMap.set(com.upokecenter.cbor.CBORObject.FromObject(e.getKey()),
+                com.upokecenter.cbor.CBORObject.FromObject(e.getValue()));
+        }
+        map.set(com.upokecenter.cbor.CBORObject.FromObject(4), claimsMap);
+        byte[] cborBytes = map.EncodeToBytes();
+        byte[] tbs = new byte[1 + cborBytes.length];
+        tbs[0] = ENTRY_TYPE_DATA;
+        System.arraycopy(cborBytes, 0, tbs, 1, cborBytes.length);
+        return tbs;
+    }
 
     private byte[] encodeTbs(long issuedAt, long expiresAt, Map<String, Object> claims) {
         // entry_type_byte(0x01) || CBOR map {2: [issuedAt, expiresAt], 3: schemaId, 4: claims}
