@@ -566,9 +566,15 @@ bit is 0, return current interpretation immediately.
 - Inserting elements in non-ascending order
 - LSB-first bit encoding instead of MSB-first
 - Inverted query alternation at odd levels
+- Not rejecting `k != 1` (using the k value to determine hash count produces
+  silently wrong query results — always reject if k != 1)
 - Verifying signature on every query instead of at load time
-- Missing the staleness check (serving a stale artifact silently)
+- Missing the staleness check; remember it is entry-count-based and must be
+  calibrated to your issuance rate — 32 entries means very different things
+  at 10k/day vs 100/month
 - Not checking `origin` in the artifact body against the expected origin
+- Accepting an artifact signed with the wrong algorithm (must use sig_alg from
+  trust config, same binding rule as for payload signatures)
 
 **Rejection cases your test suite MUST cover:** See SPEC.md §Test Vectors —
 Revocation Vectors, cases R-REJ-1 through R-REJ-9.

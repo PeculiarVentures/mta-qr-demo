@@ -1206,10 +1206,13 @@ The filter cascade encodes two disjoint sets derived from the log:
 The universe is indices 1 through `tree_size - 1`. Index 0 (null entry) is
 always excluded from both sets.
 
-A Bloom filter cascade over (R, S) produces a structure with zero false negatives
-and a configurable false positive rate. The false positive direction is deliberately
-conservative: a false positive causes the verifier to incorrectly reject a valid
-assertion, but never to incorrectly accept a revoked one.
+A Bloom filter cascade over (R, S) has the following properties as a data structure:
+zero false negatives (an element in R is always reported as revoked) and a configurable
+false positive rate (an element in S may be reported as revoked). The false positive
+direction is deliberately conservative. Note that "zero false negatives" is a property
+of the cascade given a correctly populated R — it is not an end-to-end system guarantee.
+An issuer that omits an entry from R produces a validly signed artifact that correctly
+reports that entry as not revoked. See §Security Model — What the Protocol Does Not Guarantee.
 
 ### Security Model
 
@@ -1361,10 +1364,16 @@ if artifact.tree_size < verifier.latest_checkpoint_tree_size(origin):
         reject artifact as stale
 ```
 
-`REVOCATION_STALE_THRESHOLD` is a deployment parameter. Recommended value:
-`2 * BATCH_SIZE` (32 for the reference implementation). This allows the issuer
-one full batch publication cycle of slack before the artifact is considered
-dangerously stale.
+`REVOCATION_STALE_THRESHOLD` is a deployment parameter. The recommended
+default is `2 * BATCH_SIZE` (32 for the reference implementation).
+
+**Important:** this threshold is entry-count-based, not time-based. Its
+meaning depends on the issuer's issuance rate. A transit system issuing
+10,000 credentials per day has a 32-entry window representing minutes; a
+low-volume issuer issuing 100 credentials per month has a 32-entry window
+representing weeks. Deployments MUST calibrate this parameter to their
+issuance rate. A future version may add a timestamp to the artifact body
+to enable time-based staleness checks independent of issuance rate.
 
 Issuers MUST publish a fresh revocation artifact every time they publish a new
 checkpoint. An issuer that publishes checkpoints without updating the revocation
@@ -1408,6 +1417,16 @@ unsigned integer for hashing. No other encoding is permitted.
 
 **Hash function.** SHA-256. Given an element `x` (8-byte big-endian uint64) and
 hash function index `i` (0-indexed), the j-th bit position in a filter of `m` bits is:
+
+*(Note: conventional Bloom filter implementations use non-cryptographic hash
+functions such as MurmurHash3 for performance. SHA-256 is used here because it
+is universally available across all target platforms without additional
+dependencies, is already present in every MTA-QR implementation for Merkle tree
+and checkpoint operations, and at MTA-QR deployment scales the performance
+difference is negligible — building a cascade over 1,000 revoked entries requires
+fewer than 10,000 SHA-256 calls, completing in under 1ms on any modern hardware.
+Interoperability is the primary concern; a non-cryptographic hash that varies
+between implementations would silently break cross-language cascade compatibility.)*
 
 ```
 bit_position(x, i) = (big_endian_uint64(SHA-256(x || uint8(i))[0:8])) mod m
@@ -1458,7 +1477,11 @@ function BuildCascade(R, S):
       if bits[bit] == 1:
         new_fp_set.add(x)
 
-    // Next level: encode the false positives to eliminate them
+    // Next level: encode the false positives to eliminate them.
+    // Invariant: include_set is the set this level encodes.
+    // current_fp_set is the set whose false positives define the next level.
+    // Both are new_fp_set because Level N+1 encodes exactly the false
+    // positives of Level N — elements of S that made it through Level N.
     include_set = new_fp_set
     current_fp_set = new_fp_set
     level_index += 1
@@ -1504,9 +1527,11 @@ The cascade is serialized as follows. All integer fields are big-endian.
 uint8   num_levels          (number of levels, 0..255)
 for each level (index 0..num_levels-1):
   uint32  bit_count         (number of bits in this level's filter)
-  uint8   k                 (number of hash functions; always 1 in this spec)
+  uint8   k                 (number of hash functions; MUST be 1; reject if not 1)
   ceil(bit_count/8) bytes   bit_array (MSB of first byte = bit 0)
 ```
+
+Verifiers MUST reject any cascade where `k != 1` at any level. A parser that uses the `k` value to determine how many hash functions to apply will compute different bit positions than intended, silently producing wrong query results without any parse error. The field is included in the format to preserve extensibility, but `k = 1` is the only valid value in this version.
 
 Bit indexing: bit `i` of the filter is stored in byte `i/8` at bit position
 `7 - (i mod 8)` (MSB-first within each byte). Bit 0 is the most significant
@@ -1536,12 +1561,13 @@ as a checkpoint. The body is what the issuer signature covers.
 ```
 <origin>\n
 <tree_size decimal>\n
-crlite-v1\n
+mta-qr-revocation-v1\n
 <base64(cascade_bytes)>\n
 ```
 
-The `crlite-v1` literal is the artifact type identifier. Verifiers MUST reject
-artifacts with unrecognized type identifiers. `cascade_bytes` is the binary
+The `mta-qr-revocation-v1` literal is the artifact type identifier, specific to
+MTA-QR. This format is not backward-compatible with CRLite artifacts. Verifiers
+MUST reject artifacts with unrecognized type identifiers. `cascade_bytes` is the binary
 encoding defined above, base64-encoded per RFC 4648 §4 (standard alphabet,
 `=` padding, no line breaks).
 
@@ -1549,7 +1575,7 @@ encoding defined above, base64-encoded per RFC 4648 §4 (standard alphabet,
 ```
 <origin>
 <tree_size decimal>
-crlite-v1
+mta-qr-revocation-v1
 <base64(cascade_bytes)>
 
 — <issuer_key_name> <base64(4_byte_key_hash || issuer_signature)>
@@ -1562,6 +1588,14 @@ convention, identical to how the checkpoint issuer signature is computed.
 
 Verifiers MUST verify this signature before trusting the artifact. An artifact
 with an invalid or missing signature MUST be discarded entirely.
+
+**Algorithm binding.** The revocation artifact signature MUST be verified using
+the `sig_alg` from the trust configuration for the origin — the same algorithm
+binding requirement that applies to payload signature verification (§Trust Model).
+Verifiers MUST NOT infer the signing algorithm from the key name, key length, or
+signature length. An implementation that dispatches by signature length would
+accept an Ed25519 signature where ECDSA P-256 is required, or vice versa, since
+both produce 64-byte signatures.
 
 ### Trust Configuration
 
@@ -1589,10 +1623,12 @@ updates. The endpoint returns the full signed note as `text/plain; charset=utf-8
 **Full artifact (`GET /revoked`):** A complete cascade covering all issued
 non-expired entries. This is the only format defined for v1.
 
-**Delta updates** are deferred to v2. The `crlite-v1-delta` artifact type
-identifier is reserved but its format is not defined in this version. Issuers
-that need bandwidth-efficient updates in high-volume deployments SHOULD track
-the Clubcard construction (Schanck 2025) for future reference.
+**Delta updates** are deferred to v2. The `mta-qr-revocation-v1-delta` artifact
+type identifier is reserved but its format is not defined in this version.
+Implementations MUST NOT implement `mta-qr-revocation-v1-delta` until the
+format is specified — doing so before the spec exists guarantees incompatibility.
+Issuers needing bandwidth-efficient updates at high volume SHOULD track the
+Clubcard construction (Schanck 2025) for future reference.
 
 ### Verifier Behavior
 
@@ -1622,11 +1658,17 @@ and fetch failed or network unavailable), the verifier declines to verify and
 reports the revocation check as failed. A missing artifact cannot be
 distinguished from an attacker serving an empty revocation list.
 
-**Fail-open posture (non-default).** Verifiers in deployments where revocation
-is best-effort MAY configure fail-open: if no artifact is available, the
-revocation check passes with a warning in the verification trace. This MUST be
-an explicit deployment configuration. The verification trace MUST clearly
-indicate that the revocation check was skipped.
+**Fail-open posture (non-default, discouraged).** Verifiers in deployments
+where revocation is genuinely best-effort MAY configure fail-open: if no
+artifact is available, the revocation check passes. This MUST be an explicit
+deployment configuration — never a default. Implementations MUST:
+- Log a prominent warning at startup when fail-open is configured
+- Include "revocation check skipped (fail-open)" in every verification trace
+- Make fail-open harder to enable than fail-closed in the API or configuration
+  (e.g., require a named constant, not just `failOpen: true`)
+
+Fail-open silently converts a network-level revocation suppression attack into
+an accepted verification. Most deployments should not use it.
 
 **Artifact load procedure.** When a revocation artifact is fetched (either
 on first load or cache refresh), before storing it:
@@ -1634,7 +1676,7 @@ on first load or cache refresh), before storing it:
 2. Verify the issuer signature over the four-line body. If verification fails,
    discard the artifact entirely. Do not cache it.
 3. Check that `origin` in the body matches the expected origin.
-4. Check that `artifact_type` is `crlite-v1`. Reject unrecognized types.
+4. Check that `artifact_type` is `mta-qr-revocation-v1`. Reject unrecognized types.
 5. Decode the base64 cascade bytes. If decoding fails, discard.
 6. Apply the staleness check: if `tree_size` is more than
    `REVOCATION_STALE_THRESHOLD` entries behind the verifier's latest
@@ -1683,9 +1725,11 @@ approximately `1.44 × n / 8` bytes plus a small constant per level.
 - Schanck. "Clubcards for the WebPKI: smaller certificate revocation tests in
   theory and practice." IEEE S&P 2025.
   https://research.mozilla.org/files/2025/04/clubcards_for_the_webpki.pdf
-- Mozilla CRLite reference implementation (MPL-2.0):
+- Mozilla CRLite reference implementation — filter cascade construction reference
+  (MPL-2.0, binary format not compatible with MTA-QR):
   https://github.com/mozilla/crlite
-- Mozilla rust-cascade library (MPL-2.0):
+- Mozilla rust-cascade library — cascade algorithm reference
+  (MPL-2.0, binary format not compatible with MTA-QR):
   https://github.com/mozilla/rust-cascade
 
 ---
@@ -1873,7 +1917,7 @@ Expected:
 | R-REJ-2 | Valid signature, `bit_count = 0` at any level | Discard: malformed artifact |
 | R-REJ-3 | Signature over correct body, but signed by wrong key | Discard: signature verification failure |
 | R-REJ-4 | Artifact body `origin` does not match expected origin | Discard: origin mismatch |
-| R-REJ-5 | Artifact body `artifact_type` is `crlite-v2` (unrecognized) | Discard: unknown type |
+| R-REJ-5 | Artifact body `artifact_type` is `mta-qr-revocation-v2` (unrecognized) | Discard: unknown type |
 | R-REJ-6 | Artifact `tree_size` is 0 | Discard: malformed (tree_size must be ≥ 1) |
 | R-REJ-7 | Valid artifact, but `artifact.tree_size` is more than `REVOCATION_STALE_THRESHOLD` behind verifier's checkpoint `tree_size` | Discard: stale artifact |
 | R-REJ-8 | Artifact body has only 3 lines (missing `filter_bytes_base64` line) | Discard: parse error |
