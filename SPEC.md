@@ -226,12 +226,12 @@ which key and signature type to use when validating the checkpoint.
 | Value | Algorithm | Sig size | WebCrypto? | Quantum-resistant? | Reference impl |
 |-------|-----------|----------|------------|-------------------|----|
 | 0 | FN-DSA-512 (FIPS 206) | up to 666 bytes, typ. 600–650 | No | Yes | — |
-| 1 | ML-DSA-44 (FIPS 204) | 2,420 bytes (fixed) | No | Yes | ✓ Go + TypeScript |
+| 1 | ML-DSA-44 (FIPS 204) | 2,420 bytes (fixed) | No | Yes | ✓ Go, TypeScript, Rust, Java |
 | 2 | ML-DSA-65 (FIPS 204) | 3,309 bytes (fixed) | No | Yes | — |
 | 3 | SLH-DSA-SHA2-128s (FIPS 205) | 7,856 bytes (fixed) | No | Yes | — |
-| 4 | ECDSA P-256 | 64 bytes (raw r‖s, IEEE P1363) | ✓ Yes | No | ✓ Go + TypeScript |
+| 4 | ECDSA P-256 | 64 bytes (raw r‖s, IEEE P1363) | ✓ Yes | No | ✓ Go, TypeScript, Rust, Java |
 | 5 | ECDSA P-384 | 96 bytes (raw r‖s, IEEE P1363) | ✓ Yes | No | — |
-| 6 | Ed25519 | 64 bytes | ✓ Modern | No | ✓ Go + TypeScript |
+| 6 | Ed25519 | 64 bytes | ✓ Modern | No | ✓ Go, TypeScript, Rust, Java |
 
 Unrecognized `sig_alg` values MUST be rejected.
 
@@ -1071,9 +1071,7 @@ signs independently and the other's verify function MUST accept that signature.
 Before any MTA-QR implementation can use ECDSA P-256, ECDSA P-384, or FN-DSA-512
 for checkpoint signing, a note signature algorithm type must be registered for
 each at C2SP. Ed25519 (`sig_alg=6`) is fully specified and not blocked.
-ML-DSA-44 (`sig_alg=1`) is implemented in this reference (Go via cloudflare/circl;
-TypeScript via @noble/post-quantum) but also requires C2SP note signature registration
-before it can interoperate with standard tlog-checkpoint parsers.
+ML-DSA-44 (`sig_alg=1`) is implemented in all four reference implementations (Go via cloudflare/circl; TypeScript via @noble/post-quantum; Rust via ml-dsa; Java via BouncyCastle 1.79+ MLDSAKeyPairGenerator) but also requires C2SP note signature registration before it can interoperate with standard tlog-checkpoint parsers.
 
 For ECDSA P-256 and P-384, the registration must specify:
 - Note verifier key name format for ECDSA public keys (uncompressed point, base64-encoded)
