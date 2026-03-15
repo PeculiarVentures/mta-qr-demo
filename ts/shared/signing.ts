@@ -85,8 +85,9 @@ function rawPubToKeyObj(pub: Uint8Array) {
   return createPublicKey({ key: der, format: "der", type: "spki" });
 }
 
-function buildKeyName(algLabel: string, pubBytes: Uint8Array): string {
-  return `${algLabel}+${Buffer.from(pubBytes).toString("base64")}`;
+function buildKeyName(algLabel: string, _pubBytes: Uint8Array): string {
+  // Per c2sp.org/signed-note: key name in signature lines is the bare label.
+  return algLabel;
 }
 
 export function ed25519FromSeed(seed: Uint8Array): Signer {

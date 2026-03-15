@@ -26,8 +26,10 @@ public interface Signer {
     int getAlg();
 
     /**
-     * Returns the key name as it appears in tlog-checkpoint note signature lines.
-     * Format: {@code "<label>+<base64(pubkey)>"}. Synchronous — must not block.
+     * Returns the bare key name as it appears in tlog-checkpoint note signature lines.
+     * Per c2sp.org/signed-note: just the human label (e.g. {@code "local-Ed25519"}).
+     * The full verifier key string (name+hex_keyid+base64(type+pub)) belongs in the
+     * trust config only, not in the signature line itself. Synchronous — must not block.
      */
     String getKeyName();
 

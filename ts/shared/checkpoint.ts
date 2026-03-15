@@ -121,13 +121,15 @@ export function verifyCosignature(
 }
 
 /**
- * Derive the 4-byte witness key ID.
- * SHA-256("<name>+<base64(pubkey)>")[0:4]
+ * Derive the 4-byte key ID per c2sp.org/signed-note:
+ *   key_id = SHA-256(name || 0x0A || 0x01 || raw_pubkey)[0:4]
  */
 export function witnessKeyID(name: string, pubKey: Uint8Array): Uint8Array {
-  const keyName = `${name}+${Buffer.from(pubKey).toString("base64")}`;
-  const h = createHash("sha256").update(keyName).digest();
-  return new Uint8Array(h.subarray(0, 4));
+  const h = createHash("sha256");
+  h.update(Buffer.from(name, "utf8"));
+  h.update(Buffer.from([0x0a, 0x01]));
+  h.update(Buffer.from(pubKey));
+  return new Uint8Array(h.digest().subarray(0, 4));
 }
 
 /**

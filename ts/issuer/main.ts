@@ -34,6 +34,8 @@ function makeIssuerSigner(): Signer {
 }
 const issuerSigner: Signer = makeIssuerSigner();
 const issuerPub = issuerSigner.publicKeyBytes();
+// Per c2sp.org/signed-note: key_id = SHA-256(name||0x0A||0x01||pub)[0:4]
+const issuerKeyID = witnessKeyID(issuerSigner.keyName, issuerPub);
 
 interface WitnessKey { name: string; keyID: Uint8Array; pub: Uint8Array; seed: Uint8Array; }
 const witnesses: WitnessKey[] = [0, 1].map(i => {
@@ -187,17 +189,22 @@ const server = createServer(async (req, res) => {
   if (req.method === "GET" && url.pathname === "/checkpoint") {
     const ckpt = latestCkpt!;
     let note = Buffer.from(ckpt.body).toString() + "\n";
-    note += `— ${issuerSigner.keyName} ${Buffer.from(ckpt.issuerSig).toString("base64")}\n`;
+    // Per c2sp.org/signed-note: payload = 4-byte key_hash || raw_sig
+    const issuerPayload = new Uint8Array(4 + ckpt.issuerSig.length);
+    issuerPayload.set(issuerKeyID, 0);
+    issuerPayload.set(ckpt.issuerSig, 4);
+    note += `— ${issuerSigner.keyName} ${Buffer.from(issuerPayload).toString("base64")}\n`;
     for (let i = 0; i < witnesses.length; i++) {
       const w = witnesses[i];
       const c = ckpt.cosigs[i];
-      const keyName = `${w.name}+${Buffer.from(w.pub).toString("base64")}`;
-      const tsBuf = new Uint8Array(8);
+      // Per c2sp.org/signed-note + tlog-cosignature:
+      //   4-byte key_hash || 8-byte timestamp || 64-byte Ed25519 sig = 76 bytes
+      const payload = new Uint8Array(76);
+      payload.set(w.keyID, 0);
       let tsVal = c.timestamp;
-      for (let j = 7; j >= 0; j--) { tsBuf[j] = Number(tsVal & BigInt(0xff)); tsVal >>= BigInt(8); }
-      const tsig = new Uint8Array(72);
-      tsig.set(tsBuf); tsig.set(c.signature, 8);
-      note += `— ${keyName} ${Buffer.from(tsig).toString("base64")}\n`;
+      for (let j = 7; j >= 0; j--) { payload[4 + j] = Number(tsVal & BigInt(0xff)); tsVal >>= BigInt(8); }
+      payload.set(c.signature, 12);
+      note += `— ${w.name} ${Buffer.from(payload).toString("base64")}\n`;
     }
     return text(res, note);
   }

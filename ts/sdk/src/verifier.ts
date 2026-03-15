@@ -299,8 +299,10 @@ export class Verifier {
     for (const line of sigLines) {
       if (!line.includes(this.trust.issuerKeyName)) continue;
       const raw = lastFieldBase64(line);
-      if (!raw) continue;
-      if (verifySig(this.trust.sigAlg, body, raw, this.trust.issuerPubKey)) {
+      if (!raw || raw.length < 4) continue;
+      // Per c2sp.org/signed-note: first 4 bytes are the key hash; remaining bytes are the sig.
+      const rawSig = raw.slice(4);
+      if (verifySig(this.trust.sigAlg, body, rawSig, this.trust.issuerPubKey)) {
         issuerOk = true;
         break;
       }
@@ -311,13 +313,16 @@ export class Verifier {
     const verified = new Set<string>();
     for (const line of sigLines) {
       const raw = lastFieldBase64(line);
-      if (!raw || raw.length < 72) continue;
-      const tsBuf = raw.slice(0, 8);
-      const ts    = tsBuf.reduce(
+      // Per c2sp.org/signed-note + tlog-cosignature: 4-byte key_hash || 8-byte ts || 64-byte sig
+      if (!raw || raw.length !== 76) continue;
+      const keyHash = raw.slice(0, 4);
+      const tsBuf   = raw.slice(4, 12);
+      const ts      = tsBuf.reduce(
         (acc, b, i) => acc | (BigInt(b) << BigInt((7 - i) * 8)), BigInt(0)
       );
-      const sig   = raw.slice(8, 72);
+      const sig     = raw.slice(12, 76);
       for (const w of this.trust.witnesses) {
+        if (!keyHash.every((b, i) => b === w.keyId[i])) continue;
         if (verifySig(SIG_ALG_ED25519, cosignatureMessage(body, ts), sig, w.pubKey)) {
           verified.add(w.name);
         }

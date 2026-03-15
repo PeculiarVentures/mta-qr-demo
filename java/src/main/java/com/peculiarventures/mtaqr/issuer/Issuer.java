@@ -205,17 +205,24 @@ public final class Issuer {
         if (ckpt == null) throw new IllegalStateException("call init() first");
         StringBuilder sb = new StringBuilder();
         sb.append(new String(ckpt.body(), StandardCharsets.UTF_8)).append('\n');
+        // Per c2sp.org/signed-note: sig payload = 4-byte key_hash || raw_signature
+        byte[] issuerKeyId = witnessKeyId(signer.getKeyName(), issuerPub);
+        byte[] issuerPayload = new byte[4 + ckpt.issuerSig().length];
+        System.arraycopy(issuerKeyId, 0, issuerPayload, 0, 4);
+        System.arraycopy(ckpt.issuerSig(), 0, issuerPayload, 4, ckpt.issuerSig().length);
         sb.append("— ").append(signer.getKeyName()).append(' ')
-          .append(Base64.getEncoder().encodeToString(ckpt.issuerSig())).append('\n');
+          .append(Base64.getEncoder().encodeToString(issuerPayload)).append('\n');
         for (int i = 0; i < witnesses.size(); i++) {
             WitnessKey w = witnesses.get(i);
             WitnessCosig c = ckpt.cosigs().get(i);
-            String keyName = w.name() + "+" + Base64.getEncoder().encodeToString(w.pub());
-            byte[] tsig = new byte[72];
-            ByteBuffer.wrap(tsig).putLong(c.timestamp());
-            System.arraycopy(c.signature(), 0, tsig, 8, 64);
-            sb.append("— ").append(keyName).append(' ')
-              .append(Base64.getEncoder().encodeToString(tsig)).append('\n');
+            // Per c2sp.org/signed-note + tlog-cosignature:
+            //   4-byte key_hash || 8-byte timestamp || 64-byte Ed25519 sig = 76 bytes
+            byte[] payload = new byte[76];
+            System.arraycopy(w.keyId(), 0, payload, 0, 4);
+            ByteBuffer.wrap(payload, 4, 8).putLong(c.timestamp());
+            System.arraycopy(c.signature(), 0, payload, 12, 64);
+            sb.append("— ").append(w.name()).append(' ')
+              .append(Base64.getEncoder().encodeToString(payload)).append('\n');
         }
         return sb.toString();
     }
@@ -412,12 +419,18 @@ public final class Issuer {
         return msg;
     }
 
+    /**
+     * Derives the 4-byte key ID per c2sp.org/signed-note:
+     *   key_id = SHA-256(name || 0x0A || 0x01 || raw_pubkey)[0:4]
+     * where 0x0A is newline and 0x01 is the Ed25519 signature type identifier byte.
+     */
     public static byte[] witnessKeyId(String name, byte[] pub) {
         try {
-            String keyName = name + "+" + Base64.getEncoder().encodeToString(pub);
             MessageDigest sha = MessageDigest.getInstance("SHA-256");
-            byte[] h = sha.digest(keyName.getBytes(StandardCharsets.UTF_8));
-            return Arrays.copyOf(h, 4);
+            sha.update(name.getBytes(StandardCharsets.UTF_8));
+            sha.update(new byte[]{0x0a, 0x01}); // newline + Ed25519 type byte
+            sha.update(pub);
+            return Arrays.copyOf(sha.digest(), 4);
         } catch (Exception e) { throw new RuntimeException(e); }
     }
 

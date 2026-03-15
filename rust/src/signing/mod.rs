@@ -77,8 +77,9 @@ pub trait Signer: Send + Sync {
     /// Wire algorithm identifier.
     fn alg(&self) -> u8;
 
-    /// Key name as it appears in tlog-checkpoint note signature lines.
-    /// Format: `"<label>+<base64(pubkey)>"`.
+    /// Bare key name as it appears in tlog-checkpoint note signature lines.
+    /// Per c2sp.org/signed-note: just the human name. The full verifier key
+    /// string (name+hex_keyid+base64(type+pub)) belongs in the trust config only.
     fn key_name(&self) -> &str;
 
     /// Sign a raw message. Returns the raw signature bytes.

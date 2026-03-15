@@ -14,6 +14,7 @@ import (
 	"time"
 
 	issuelog "github.com/mta-qr/demo/issuer/log"
+	"github.com/mta-qr/demo/shared/checkpoint"
 	"github.com/mta-qr/demo/shared/merkle"
 	"github.com/mta-qr/demo/shared/signing"
 	"github.com/mta-qr/demo/shared/payload"
@@ -87,18 +88,23 @@ func handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 
 	// Assemble the full signed note: body + blank line + signature lines.
 	note := string(ckpt.Body) + "\n"
+	// Per c2sp.org/signed-note: sig payload = 4-byte keyhash || raw_signature.
 	issuerKeyName := issuerLog.NoteKeyName()
-	issueSigB64 := base64.StdEncoding.EncodeToString(ckpt.IssuerSig)
-	note += fmt.Sprintf("— %s %s\n", issuerKeyName, issueSigB64)
+	issuerKeyID := issuerLog.NoteKeyID()
+	issuerPayload := append(issuerKeyID[:], ckpt.IssuerSig...)
+	note += fmt.Sprintf("— %s %s\n", issuerKeyName, base64.StdEncoding.EncodeToString(issuerPayload))
 
 	for i, cosig := range ckpt.Cosigs {
 		w := issuerLog.Witnesses()[i]
-		witnessKeyName := w.Name + "+" + base64.StdEncoding.EncodeToString(w.PubKey)
-		// Encode timestamped_signature: 8-byte big-endian timestamp + 64-byte sig.
-		ts := make([]byte, 8)
-		binary.BigEndian.PutUint64(ts, cosig.Timestamp)
-		tsig := append(ts, cosig.Signature[:]...)
-		note += fmt.Sprintf("— %s %s\n", witnessKeyName, base64.StdEncoding.EncodeToString(tsig))
+		// Per c2sp.org/signed-note: sig line is "— <bare_name> <base64(4_keyhash || payload)>"
+		// For tlog-cosignature: payload = 8-byte big-endian timestamp + 64-byte Ed25519 sig.
+		// Total base64 payload = 4 + 8 + 64 = 76 bytes.
+		keyID := checkpoint.KeyID(w.Name, w.PubKey)
+		payload := make([]byte, 4+8+64)
+		copy(payload[0:4], keyID[:])
+		binary.BigEndian.PutUint64(payload[4:12], cosig.Timestamp)
+		copy(payload[12:76], cosig.Signature[:])
+		note += fmt.Sprintf("— %s %s\n", w.Name, base64.StdEncoding.EncodeToString(payload))
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -198,6 +204,10 @@ func handleQRPNG(w http.ResponseWriter, r *http.Request) {
 	size, _ := strconv.Atoi(r.URL.Query().Get("size"))
 	if size == 0 {
 		size = 400
+	}
+	// Cap size to prevent expensive large QR renders.
+	if size > 2000 {
+		size = 2000
 	}
 
 	png, err := qrcode.Encode(string(payloadBytes), qrcode.Medium, size)

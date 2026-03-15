@@ -53,9 +53,10 @@ export interface Signer {
   /** Wire algorithm identifier. Determines signature and public key sizes. */
   readonly sigAlg: SigAlg;
   /**
-   * Key name as it will appear in tlog-checkpoint note signature lines.
-   * Format: "<label>+<base64(pubkey)>"
-   * GoodKey should return this from the key metadata endpoint.
+   * Bare key name as it appears in tlog-checkpoint note signature lines.
+   * Per c2sp.org/signed-note: just the human name (e.g. "example.com/log").
+   * The full verifier key string (name+hex_keyid+base64(type+pub)) is in
+   * the trust config only, not in the signature line itself.
    */
   readonly keyName: string;
   /**

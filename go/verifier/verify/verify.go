@@ -2,6 +2,7 @@
 package verify
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -76,6 +77,7 @@ type Verifier struct {
 	anchors    map[uint64]*TrustAnchor
 	cache      map[string]*CachedCheckpoint
 	cacheOrder []string // insertion order for LRU eviction
+	httpClient *http.Client
 }
 
 // New creates an empty Verifier.
@@ -84,6 +86,7 @@ func New() *Verifier {
 		anchors:    make(map[uint64]*TrustAnchor),
 		cache:      make(map[string]*CachedCheckpoint),
 		cacheOrder: make([]string, 0, maxCacheEntries+1),
+		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -164,7 +167,17 @@ func (v *Verifier) Verify(payloadBytes []byte) *Result {
 	}
 	add("Algorithm binding", true, fmt.Sprintf("sig_alg=%d matches trust config", p.SigAlg))
 
-	// 6. Checkpoint resolution.
+	// 6. Mode check — Mode 0 (embedded checkpoint) not yet implemented.
+	// A Mode 0 payload carries its own root_hash, issuer_sig, and witness cosigs
+	// in the binary payload itself; the verifier should verify those directly
+	// rather than fetching the checkpoint over the network. Silently falling
+	// through to the Mode 1 network fetch is the wrong behavior: it would
+	// succeed or fail based on network reachability rather than the embedded proof.
+	if p.Mode == 0 {
+		return fail("Mode check", "Mode 0 (embedded checkpoint) is not yet implemented by this verifier — use Mode 1")
+	}
+
+	// 7. Checkpoint resolution.
 	cacheKey := fmt.Sprintf("%s:%d", anchor.Origin, p.TreeSize)
 	v.mu.RLock()
 	cached := v.cache[cacheKey]
@@ -195,7 +208,7 @@ func (v *Verifier) Verify(payloadBytes []byte) *Result {
 		v.mu.Unlock()
 	}
 
-	// 7. Entry hash.
+	// 8. Entry hash.
 	entryHash := merkle.EntryHash(p.TBS)
 	add("Entry hash", true, fmt.Sprintf("SHA-256(0x00 ‖ tbs) = %s", hex.EncodeToString(entryHash)))
 
@@ -282,13 +295,14 @@ func (v *Verifier) Verify(payloadBytes []byte) *Result {
 
 // fetchAndVerify fetches and verifies the checkpoint from the issuer endpoint.
 func (v *Verifier) fetchAndVerify(anchor *TrustAnchor, requiredSize uint64) ([]byte, uint64, error) {
-	resp, err := http.Get(anchor.CheckpointURL)
+	resp, err := v.httpClient.Get(anchor.CheckpointURL)
 	if err != nil {
 		return nil, 0, fmt.Errorf("GET %s: %w", anchor.CheckpointURL, err)
 	}
 	defer resp.Body.Close()
-	// io.ReadAll — a single Read() call is not guaranteed to return all bytes.
-	buf, err := io.ReadAll(resp.Body)
+	// Limit to 64 KB — a valid checkpoint is ~200 bytes.
+	const maxCheckpointBytes = 64 * 1024
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, maxCheckpointBytes))
 	if err != nil {
 		return nil, 0, fmt.Errorf("read checkpoint body: %w", err)
 	}
@@ -338,10 +352,12 @@ func verifyNote(note string, anchor *TrustAnchor, requiredSize uint64) ([]byte, 
 			continue
 		}
 		raw, err := lastFieldBase64(line)
-		if err != nil {
+		if err != nil || len(raw) < 4 {
 			continue
 		}
-		if signing.Verify(anchor.SigAlg, body, raw, anchor.IssuerPubKey) {
+		// Per c2sp.org/signed-note: first 4 bytes are the key hash; remaining bytes are the sig.
+		rawSig := raw[4:]
+		if signing.Verify(anchor.SigAlg, body, rawSig, anchor.IssuerPubKey) {
 			issuerOK = true
 			break
 		}
@@ -356,13 +372,19 @@ func verifyNote(note string, anchor *TrustAnchor, requiredSize uint64) ([]byte, 
 	verifiedWitnesses := map[string]bool{}
 	for _, line := range sigLines {
 		raw, err := lastFieldBase64(line)
-		if err != nil || len(raw) != 72 {
+		if err != nil || len(raw) != 76 {
 			continue
 		}
-		ts := binary.BigEndian.Uint64(raw[:8])
-		wsig := raw[8:72]
+		// Per c2sp.org/signed-note: first 4 bytes are the key hash (routing hint).
+		// tlog-cosignature payload: 8-byte big-endian timestamp + 64-byte Ed25519 sig.
+		keyHash := raw[0:4]
+		ts := binary.BigEndian.Uint64(raw[4:12])
+		wsig := raw[12:76]
 		msg := checkpoint.CosignatureV1Message(body, ts)
 		for _, w := range anchor.Witnesses {
+			if !bytes.Equal(keyHash, w.KeyID[:]) {
+				continue
+			}
 			if signing.Verify(signing.SigAlgEd25519, msg, wsig, w.PubKey) {
 				verifiedWitnesses[w.Name] = true
 			}

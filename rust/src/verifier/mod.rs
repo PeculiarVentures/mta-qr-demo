@@ -307,12 +307,15 @@ impl Verifier {
 
         let sig_lines: Vec<&str> = rest.lines().filter(|l| !l.trim().is_empty()).collect();
 
-        // Issuer sig — dispatch by key name
+        // Issuer sig — dispatch by key name, skip 4-byte key_hash prefix
         let mut issuer_ok = false;
         for line in &sig_lines {
             if !line.contains(&self.trust.issuer_key_name) { continue; }
             if let Some(raw) = last_field_base64(line) {
-                if verify(self.trust.sig_alg, &body, &raw, &self.trust.issuer_pub_key) {
+                if raw.len() < 4 { continue; }
+                // Per c2sp.org/signed-note: first 4 bytes are key_hash; rest is sig.
+                let raw_sig = &raw[4..];
+                if verify(self.trust.sig_alg, &body, raw_sig, &self.trust.issuer_pub_key) {
                     issuer_ok = true;
                     break;
                 }
@@ -320,15 +323,19 @@ impl Verifier {
         }
         if !issuer_ok { return Err(anyhow!("issuer signature not found or invalid")); }
 
-        // Witness cosigs — always Ed25519, 72-byte timestamped_signature
+        // Witness cosigs — always Ed25519
+        // Per c2sp.org/signed-note + tlog-cosignature:
+        //   4-byte key_hash || 8-byte timestamp || 64-byte Ed25519 sig = 76 bytes
         let mut verified: HashSet<String> = HashSet::new();
         for line in &sig_lines {
             if let Some(raw) = last_field_base64(line) {
-                if raw.len() != 72 { continue; }
-                let ts = u64::from_be_bytes(raw[..8].try_into().unwrap());
-                let wsig = &raw[8..72];
+                if raw.len() != 76 { continue; }
+                let key_hash = &raw[0..4];
+                let ts = u64::from_be_bytes(raw[4..12].try_into().unwrap());
+                let wsig = &raw[12..76];
                 let msg = cosignature_message(&body, ts);
                 for w in &self.trust.witnesses {
+                    if w.key_id != key_hash { continue; }
                     if verify(ALG_ED25519, &msg, wsig, &w.pub_key) {
                         verified.insert(w.name.clone());
                     }
