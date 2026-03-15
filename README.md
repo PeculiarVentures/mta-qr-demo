@@ -100,7 +100,7 @@ Each verifier asserts the `mode` field on the result matches the issued payload 
 
 MTA-QR has three payload modes defined in the protocol. Modes 1 and 2 are implemented in all four SDKs. Mode 0 is not yet implemented (see Known Limitations).
 
-**Mode 0 — embedded (fully offline).** The payload includes the inclusion proof and a compact cosigned checkpoint (root hash + issuer signature + witness cosignatures). No network access at scan time. Largest payload size. Not yet implemented.
+**Mode 0 — embedded (no checkpoint fetch).** The payload includes the inclusion proof and a compact cosigned checkpoint (root hash + issuer signature + witness cosignatures). No network access at scan time — the checkpoint is verified from the embedded signatures rather than fetched. A trust configuration (issuer and witness public keys) must still be pre-loaded; Mode 0 eliminates the checkpoint fetch, not the trust distribution step. Largest payload size. Not yet implemented.
 
 **Mode 1 — cached checkpoint (offline after prefetch).** The payload includes the inclusion proof but not the checkpoint. The verifier resolves the checkpoint from its local cache; on cache miss it fetches once and caches the result. This is the default mode and the right choice for most deployments.
 
@@ -214,7 +214,7 @@ These are genuine gaps that should be addressed before production use. They are 
 
 **Revocation not implemented.** The verifier emits a `revocation check` step with a fixed "no revoked ranges (v0.1 open item)" message in all four implementations. The protocol for expressing and distributing revocation sets is not defined.
 
-**Mode 0 (embedded checkpoint) not implemented.** The payload codec defines `mode=0` where the checkpoint and cosignatures are embedded directly in the payload for fully offline verification with no prefetch. The issuer and verifier in all four SDKs handle only modes 1 and 2.
+**Mode 0 (embedded checkpoint) not implemented.** The payload codec defines `mode=0` where the cosigned checkpoint (root hash + issuer signature + witness cosignatures) is embedded directly in the payload. This eliminates the checkpoint fetch at scan time but still requires a pre-loaded trust configuration — the embedded signatures are verified against the issuer and witness public keys in that config. The issuer and verifier in all four SDKs handle only modes 1 and 2.
 
 **`key_assertion` (entry_type=0x02) not implemented.** The verifier rejects `entry_type != 0x01`. Key assertions with possession proofs (challenge-response) are defined in the spec but not implemented.
 
