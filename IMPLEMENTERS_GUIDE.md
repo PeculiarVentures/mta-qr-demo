@@ -516,17 +516,19 @@ honestly.
 
 ### Steps that are legitimately stubbed in the reference implementation
 
-**Revocation (step 9):** the revocation list format is not yet defined. The
-correct stub is to emit a step in the verification trace with a clear "not
-implemented" message rather than silently skipping the step. Operators and
-auditors reading the trace need to know revocation was not checked.
+**Revocation (step 9):** the revocation format is now defined in SPEC.md §Revocation
+(Bloom filter cascade, modeled on CRLite). The reference implementations still stub
+this step. The correct stub emits a visible trace step rather than silently skipping:
 
 ```
 add("Revocation check", true, "not implemented — no revocation list defined")
 ```
 
-Do not remove this step from the trace; its presence (and its "not implemented"
-status) is itself useful information.
+When implementing: fetch the signed cascade from `GET /revoked` on the charge-cycle
+schedule alongside the checkpoint. Verify the issuer signature over the cascade body
+(same key as checkpoint). At scan time, query the locally cached cascade against
+`entry_index`. Fail-closed if no artifact is cached. See SPEC.md §Revocation and
+github.com/mozilla/crlite for the cascade construction reference implementation.
 
 **Mode 0:** implement explicit rejection. A Mode 0 payload passed to a Mode 1
 verifier must return a clear error, not silently fall through to the network
