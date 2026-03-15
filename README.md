@@ -222,7 +222,7 @@ These are genuine gaps that should be addressed before production use. They are 
 
 **Mode 2 tile server not implemented.** The SDK verifier accepts Mode 2 payloads without verifying Merkle inclusion. A complete Mode 2 deployment requires a tile server serving proof tiles at `GET /tile/{level}/{index}` and a scanner-side tile-fetching verifier that calls it. The protocol for tile format and addressing is not yet defined in `SPEC.md`.
 
-**Revocation not implemented.** The verifier emits a `revocation check` step with a fixed "no revoked ranges (v0.1 open item)" message in all four implementations. The protocol for expressing and distributing revocation sets is not defined.
+**Revocation not implemented.** The verifier emits a `revocation check` step with a fixed "not implemented — no revocation list defined yet" message in all four implementations. The protocol for expressing and distributing revocation sets is not defined.
 
 **Mode 0 (embedded checkpoint) not implemented.** The payload codec defines `mode=0` where the cosigned checkpoint (root hash + issuer signature + witness cosignatures) is embedded directly in the payload. This eliminates the checkpoint fetch at scan time but still requires a pre-loaded trust configuration — the embedded signatures are verified against the issuer and witness public keys in that config. The issuer and verifier in all four SDKs handle only modes 1 and 2.
 

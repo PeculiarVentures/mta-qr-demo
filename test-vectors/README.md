@@ -1,6 +1,6 @@
 # Test Vectors
 
-Canonical fixtures shared by the Go and TypeScript implementations. Both test suites load from `vectors.json` and assert exact byte-level output before any integration or service tests run.
+Canonical fixtures shared by all four implementations (Go, TypeScript, Rust, Java). All test suites load from `vectors.json` and assert exact byte-level output before any integration or service tests run.
 
 If a cross-implementation verification fails, run the vector tests first. A vector failure isolates the disagreement to a specific layer — CBOR encoding, checkpoint body format, Merkle path construction, signing — rather than requiring end-to-end debugging.
 
@@ -12,19 +12,17 @@ If a cross-implementation verification fails, run the vector tests first. A vect
 # Go
 cd go && go test ./shared/... -v
 
-# TypeScript
-cd ts && npm run test:vectors     # protocol vectors
-cd ts && npm run test:signing     # signing vectors
-cd ts && npm run test:all         # both
+# TypeScript (runs via SDK test suite)
+cd ts/sdk && npm test
+
+# Rust
+cd rust && cargo test
+
+# Java
+cd java && mvn test
 ```
 
-**Coverage note.** The canonical vectors in `vectors.json` are currently tested
-by Go and TypeScript only. The Rust and Java SDK interop tests exercise the
-same underlying primitives (Merkle hashing, CBOR encoding, signing) but do not
-directly load and assert against `vectors.json`. When adding a new language
-implementation, adding a vector test suite that loads `vectors.json` is the
-recommended first step — it isolates any layer-level disagreement before
-running the full interop matrix.
+All four test suites load `vectors.json` and assert exact byte output. A vector failure isolates the disagreement to a specific layer (CBOR encoding, Merkle path, signing) rather than requiring end-to-end interop debugging.
 
 ---
 
@@ -118,7 +116,7 @@ The private scalar is `SHA-256("mta-qr-test-ecdsa-scalar") mod n`. Both implemen
    }
    ```
 
-5. Add a test case to `ts/shared/vectors.test.ts`:
+5. Add a test case to `ts/sdk/src/test/vectors.test.ts`:
    ```typescript
    test("your-vector-id", () => {
        const v = vs.get("your-vector-id")!;
@@ -126,7 +124,9 @@ The private scalar is `SHA-256("mta-qr-test-ecdsa-scalar") mod n`. Both implemen
    });
    ```
 
-6. Run both suites and confirm they pass before committing.
+6. Add a test case to `rust/src/lib.rs` `vector_tests` module and `java/src/test/.../VectorTest.java` following the same pattern.
+
+7. Run all four suites and confirm they pass before committing.
 
 **Do not add a vector that one implementation fails** unless the failure exposes a real spec ambiguity that needs to be resolved. Vectors are canonical truth; failing tests mean the implementation or the spec needs to be fixed, not the vector.
 
