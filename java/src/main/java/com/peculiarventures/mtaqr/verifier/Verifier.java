@@ -343,8 +343,16 @@ public final class Verifier {
             HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(trust.checkpointUrl))
                 .GET().build();
-            noteFuture = httpClient.sendAsync(req, HttpResponse.BodyHandlers.ofString())
-                .thenApply(HttpResponse::body);
+            // Cap to 64 KB — a valid checkpoint is ~200 bytes.
+            // ofByteArray() buffers the full response; we check length before use.
+            noteFuture = httpClient.sendAsync(req, HttpResponse.BodyHandlers.ofByteArray())
+                .thenApply(resp -> {
+                    byte[] bytes = resp.body();
+                    if (bytes.length > 64 * 1024)
+                        throw new RuntimeException(
+                            "checkpoint response too large (" + bytes.length + " bytes)");
+                    return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+                });
         }
         return noteFuture.thenApply(note -> verifyNote(note, requiredSize));
     }
