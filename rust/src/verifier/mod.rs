@@ -274,7 +274,11 @@ impl Verifier {
         } else {
             #[cfg(feature = "goodkey")]
             {
-                let resp = reqwest::get(&self.trust.checkpoint_url).await
+                // 10-second timeout prevents indefinite hangs on slow issuers.
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()?;
+                let resp = client.get(&self.trust.checkpoint_url).send().await
                     .map_err(|e| anyhow!("GET {}: {e}", self.trust.checkpoint_url))?;
                 resp.text().await
                     .map_err(|e| anyhow!("read checkpoint: {e}"))?

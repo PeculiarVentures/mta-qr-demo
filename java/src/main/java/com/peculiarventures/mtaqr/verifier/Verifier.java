@@ -7,6 +7,7 @@ import com.peculiarventures.mtaqr.trust.TrustConfig;
 
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.time.Duration;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
@@ -105,7 +106,11 @@ public final class Verifier {
         public Verifier build() {
             Objects.requireNonNull(trust, "trust is required");
             return new Verifier(trust,
-                httpClient != null ? httpClient : HttpClient.newHttpClient(),
+                httpClient != null ? httpClient :
+                    // 10-second connect timeout prevents indefinite hangs on slow issuers.
+                    HttpClient.newBuilder()
+                        .connectTimeout(Duration.ofSeconds(10))
+                        .build(),
                 noteProvider);
         }
     }
