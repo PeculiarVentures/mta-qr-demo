@@ -131,6 +131,10 @@ export function decodePayload(data: Uint8Array): Payload {
   }
 
   const numProof = r.u8("proof_count");
+  const MAX_PROOF_HASHES = 64;
+  if (numProof > MAX_PROOF_HASHES) {
+    throw new Error(`payload: proof_count ${numProof} exceeds maximum ${MAX_PROOF_HASHES}`);
+  }
   if (mode === MODE_ONLINE && numProof !== 0) {
     throw new Error(`payload: Mode 2 must have proof_count=0, got ${numProof}`);
   }

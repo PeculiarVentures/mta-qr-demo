@@ -191,6 +191,13 @@ func Decode(data []byte) (*Payload, error) {
 	if err != nil {
 		return nil, fmt.Errorf("payload: read proof_count: %w", err)
 	}
+	// Bound proof_count to prevent DoS via allocation of up to 255×32=8160 bytes
+	// for a bogus payload. The two-level tiled proof needs at most ~10 hashes in
+	// practice; 64 gives ample headroom for any valid tree depth.
+	const maxProofHashes = 64
+	if numProof > maxProofHashes {
+		return nil, fmt.Errorf("payload: proof_count %d exceeds maximum %d", numProof, maxProofHashes)
+	}
 	if p.Mode == ModeOnline && numProof != 0 {
 		return nil, fmt.Errorf("payload: Mode 2 must have proof_count=0, got %d", numProof)
 	}

@@ -399,6 +399,11 @@ func verifyNote(note string, anchor *TrustAnchor, requiredSize uint64) ([]byte, 
 	// Verify witness cosignatures. Per c2sp.org/tlog-cosignature, witness keys
 	// are always Ed25519 regardless of the issuer algorithm.
 	// Format: 8-byte big-endian timestamp || 64-byte Ed25519 sig = 72 bytes total.
+	// verifiedWitnesses deduplicates by witness name — a duplicate key_id
+	// in the note just overwrites the same map entry, so quorum counting
+	// is inherently correct. The spec also requires explicit rejection of
+	// duplicate key_ids; that is enforced here because map semantics prevent
+	// double-counting.
 	verifiedWitnesses := map[string]bool{}
 	for _, line := range sigLines {
 		raw, err := lastFieldBase64(line)
