@@ -49,7 +49,9 @@ The TypeScript SDK (`ts/sdk/`) also provides a browser bundle entry point (`src/
 
 ## Protocol layer
 
-The Go HTTP service uses `go/shared/`. The TypeScript HTTP service uses `ts/shared/`. The SDK libraries each contain equivalent implementations inline. All implementations are independently derived and verified against the same canonical test vectors.
+The Go HTTP service uses `go/shared/`. The TypeScript HTTP service uses `ts/shared/`. The SDK libraries (`ts/sdk/`, `rust/`, `java/`) each contain equivalent implementations inline without a shared/ dependency. All implementations are independently derived and verified against the same canonical test vectors in `test-vectors/vectors.json`.
+
+The subsections below describe the shared Go/TypeScript implementation. The SDK implementations follow the same structure and algorithms — see the source files in each SDK directory for language-specific details.
 
 ### merkle
 

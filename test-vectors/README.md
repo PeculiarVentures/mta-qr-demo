@@ -18,6 +18,14 @@ cd ts && npm run test:signing     # signing vectors
 cd ts && npm run test:all         # both
 ```
 
+**Coverage note.** The canonical vectors in `vectors.json` are currently tested
+by Go and TypeScript only. The Rust and Java SDK interop tests exercise the
+same underlying primitives (Merkle hashing, CBOR encoding, signing) but do not
+directly load and assert against `vectors.json`. When adding a new language
+implementation, adding a vector test suite that loads `vectors.json` is the
+recommended first step — it isolates any layer-level disagreement before
+running the full interop matrix.
+
 ---
 
 ## Vectors
@@ -83,6 +91,12 @@ Note: the noble library's verify API uses `verify(sig, msg, pubKey)` order. The 
 
 All hex strings: lowercase, no `0x` prefix, no spaces.
 
+### `signing-ecdsa-p256`
+
+Validates ECDSA P-256 public key derivation from a fixed private scalar, and cross-implementation signature verification.
+
+The private scalar is `SHA-256("mta-qr-test-ecdsa-scalar") mod n`. Both implementations must derive the same public key (uncompressed, `0x04 ‖ X ‖ Y`, 65 bytes). ECDSA signing is randomized; the vector includes a `pre_recorded_sig` produced by the Go reference implementation which both implementations must verify as true.
+
 ---
 
 ## Adding a vector
@@ -116,8 +130,3 @@ All hex strings: lowercase, no `0x` prefix, no spaces.
 
 **Do not add a vector that one implementation fails** unless the failure exposes a real spec ambiguity that needs to be resolved. Vectors are canonical truth; failing tests mean the implementation or the spec needs to be fixed, not the vector.
 
-### `signing-ecdsa-p256`
-
-Validates ECDSA P-256 public key derivation from a fixed private scalar, and cross-implementation signature verification.
-
-The private scalar is `SHA-256("mta-qr-test-ecdsa-scalar") mod n`. Both implementations must derive the same public key (uncompressed, `0x04 ‖ X ‖ Y`, 65 bytes). ECDSA signing is randomized; the vector includes a `pre_recorded_sig` produced by the Go reference implementation which both implementations must verify as true.
