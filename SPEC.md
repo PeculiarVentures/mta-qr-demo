@@ -1211,6 +1211,193 @@ and a configurable false positive rate. The false positive direction is delibera
 conservative: a false positive causes the verifier to incorrectly reject a valid
 assertion, but never to incorrectly accept a revoked one.
 
+### Security Model
+
+#### Threat Model
+
+The revocation system operates within MTA-QR's existing trust model: the issuer
+is the trust anchor for their log. There is no certificate chain, no root
+program, and no independent third party that can verify the issuer's revocation
+decisions. The security properties of revocation are therefore bounded by the
+security of the issuer key.
+
+**Adversaries considered:**
+
+- **Network attacker.** Can intercept or delay fetches of the revocation artifact.
+  Can serve old or modified artifacts to verifiers who request them over
+  unauthenticated channels. Cannot forge a valid issuer signature.
+
+- **Compromised CDN or delivery infrastructure.** Can serve stale artifacts.
+  Cannot forge a valid issuer signature. Verifiers that check the artifact
+  signature and compare `tree_size` against their cached checkpoint are
+  protected against stale delivery.
+
+- **Rogue issuer.** The issuer controls R and S. An issuer can omit a
+  revocation from R, producing a filter that incorrectly reports a revoked
+  entry as valid. This is the principal limitation of the current design — see
+  §Auditability below.
+
+- **Compromised issuer key.** If the signing key is compromised, the attacker
+  can sign a revocation artifact revoking any or all entries. This is a
+  service-disruption attack on all currently valid credentials. Key compromise
+  also enables forged checkpoints (§Trust Model), making the revocation attack
+  a secondary concern. Key rotation and revocation of the issuer key itself
+  is an out-of-band operational matter — MTA-QR does not define a mechanism for
+  it.
+
+**Adversaries not in scope for this version:**
+
+- Attackers who can forge SHA-256 collisions.
+- Quantum adversaries (addressed by the issuer's PQ signing algorithm choice,
+  not by the revocation protocol).
+- Insider attackers with direct write access to the issuer's key management
+  system.
+
+#### What the Protocol Guarantees
+
+**Authenticity.** A verifier that successfully verifies the issuer signature
+over the four-line artifact body can be certain the artifact was produced by
+the holder of the issuer private key and covers the claimed origin and
+tree_size. No other party can produce a validly signed artifact.
+
+**Freshness bound.** The `tree_size` field in the artifact is a lower bound on
+when the artifact was produced — it must have been produced after the entry at
+`tree_size - 1` was issued. Verifiers MUST compare the artifact's `tree_size`
+against their most recently verified checkpoint `tree_size` for the same origin.
+If the artifact's `tree_size` is significantly smaller than the checkpoint's
+`tree_size`, the artifact may be stale. See §Rollback Resistance below.
+
+**Conservative false positive direction.** The filter cascade has zero false
+negatives: a revoked entry will always be reported as revoked. False positives
+(a valid entry reported as revoked) are possible at the configured rate but
+never result in accepting a revoked entry.
+
+**Fail-closed on missing or invalid artifact.** A verifier that cannot obtain
+or verify a revocation artifact MUST NOT silently pass the revocation check.
+This prevents a network attacker from suppressing revocation checking by
+blocking artifact fetches.
+
+#### What the Protocol Does Not Guarantee
+
+**Revocation by the credential subject.** The credential subject (the person
+or entity the credential was issued to) has no mechanism in this protocol to
+request revocation. Only the issuer can populate R. Deployments where subjects
+need to request revocation must implement an out-of-band revocation request
+channel from the subject to the issuer's revocation management system.
+
+**Independent verification of omission.** Unlike CRLite — where the filter's
+inputs (CA-signed CRLs) are independently verifiable, so a rogue aggregator
+that omits a revocation can be detected by any third party — MTA-QR revocation
+has no equivalent check. The issuer controls both what goes in R and the
+signing key. An issuer that omits an entry from R produces a validly signed
+artifact that verifiers will accept. There is no cryptographic mechanism in
+the current protocol to detect this.
+
+Deployments with strong revocation integrity requirements should consider
+operational controls: publishing revocation decisions in a separate,
+independently monitored channel (e.g., a public bulletin signed by a different
+key) and committing to public disclosure of all revocation events within a
+defined time window. This is an operational guarantee, not a cryptographic one.
+
+**Root program override.** There is no mechanism for a trust anchor operator
+or root program to force revocation of entries across an issuer's log. If a
+jurisdiction's or operator's issuer key is compromised and they are unable to
+publish a correct revocation artifact, verifiers have no protocol-level
+recourse. Operational continuity planning for key compromise must be defined
+at the deployment level.
+
+#### Authorization: Who Can Revoke
+
+The revocation protocol does not define an authorization model for the
+revocation operation itself — that is, it does not define who is permitted to
+add entries to R or how that permission is controlled. This is an intentional
+scope boundary: the protocol defines the format and cryptographic properties of
+the artifact, not the governance of the revocation decision.
+
+**What implementations MUST enforce:**
+
+- Only the holder of the issuer private key can produce a valid signed
+  revocation artifact. The protocol provides this guarantee cryptographically.
+- The revocation key is the same as the checkpoint signing key. Implementations
+  MUST NOT accept revocation artifacts signed by any other key.
+
+**What implementations SHOULD do operationally:**
+
+- Maintain an append-only log of revocation decisions, including the identity
+  of the operator who made each decision, the reason, and the timestamp. This
+  provides an audit trail for post-hoc review.
+- Require multi-party authorization for revocation of more than N entries in a
+  single operation, as a safeguard against bulk revocation by a compromised
+  operator account.
+- Separate the key material used to produce revocation artifacts from
+  day-to-day issuance key material, using a hardware security module or
+  equivalent. The checkpoint signing key and the revocation signing key are
+  the same cryptographic key, but they can be stored in different HSM key slots
+  with different operator authorization policies.
+
+**Note on the key reuse design.** Using the same key for both checkpoints and
+revocation artifacts is a deliberate design choice that simplifies the trust
+model — verifiers need only one public key per origin, and no new trust material
+needs to be distributed to add revocation support. The tradeoff is that key
+compromise enables both forged checkpoints and forged revocation artifacts.
+Deployments that want finer-grained key separation should use distinct origins
+for their checkpoint-issuing service and their revocation service, each with a
+separately managed key, and configure verifiers with both keys. The SPEC does
+not define this multi-key model; it is mentioned here as an operational option.
+
+#### Rollback Resistance
+
+The artifact body contains `tree_size` but no explicit sequence number or
+timestamp. A network attacker who caches an old artifact and serves it to
+verifiers can cause them to miss revocations that were added after that
+artifact was produced.
+
+Verifiers MUST implement the following check to limit rollback window:
+
+```
+if artifact.tree_size < verifier.latest_checkpoint_tree_size(origin):
+    if (verifier.latest_checkpoint_tree_size(origin) - artifact.tree_size)
+        > REVOCATION_STALE_THRESHOLD:
+        reject artifact as stale
+```
+
+`REVOCATION_STALE_THRESHOLD` is a deployment parameter. Recommended value:
+`2 * BATCH_SIZE` (32 for the reference implementation). This allows the issuer
+one full batch publication cycle of slack before the artifact is considered
+dangerously stale.
+
+Issuers MUST publish a fresh revocation artifact every time they publish a new
+checkpoint. An issuer that publishes checkpoints without updating the revocation
+artifact is producing stale artifacts that will eventually fail the staleness
+check at verifiers.
+
+**Limitation.** Rollback resistance is only as strong as the verifier's
+knowledge of the latest checkpoint tree_size. A verifier that has never
+fetched a checkpoint for an origin has no baseline to compare against. On first
+use, verifiers MUST fetch both the checkpoint and the revocation artifact before
+accepting any payload for that origin.
+
+#### Auditability
+
+CRLite achieves auditability by publishing a signed audit log containing the
+CA-signed CRLs and OCSP responses used to construct each filter. Any third
+party can independently verify the filter is consistent with the CA's published
+revocation data. This check is possible because the CA's revocation data is
+independently verifiable (CA-signed) and publicly available.
+
+MTA-QR does not have an equivalent mechanism in v1. The issuer is the sole
+authority for both the credential data (the log) and the revocation state.
+There is no independently verifiable record that the filter correctly reflects
+all revocations the issuer has made.
+
+A v2 auditability extension would commit the revocation artifact to the log
+itself — for example, by requiring the issuer to include a hash of the current
+revocation artifact in each checkpoint body, making the revocation state
+tamper-evident and verifiable by witnesses. This would not prevent an issuer
+from omitting entries from R, but it would make the revocation state
+attributable and tamper-evident, providing a basis for post-hoc audits. This is
+deferred to a future version.
+
 ### Normative Construction Parameters
 
 These parameters MUST be used exactly as specified. Any deviation produces
@@ -1331,6 +1518,15 @@ The total size of the serialized cascade is:
 An empty cascade (R is empty at construction time) is encoded as `num_levels = 0`
 (1 byte). Querying an empty cascade MUST return NOT_REVOKED for all inputs.
 
+**Empty cascade security note.** A valid signature over a `num_levels = 0`
+artifact is indistinguishable from a valid signature over a legitimately
+empty revocation set. Verifiers MUST NOT treat an empty cascade as suspicious
+— it is the correct encoding when R is empty. However, verifiers in
+deployments where revocations are known to have occurred SHOULD log a warning
+when the artifact reports an empty R. Detection of a malicious empty-cascade
+artifact is an operational matter (out-of-band revocation audit log), not a
+cryptographic one within this protocol.
+
 ### Wire Format
 
 The revocation artifact is a signed note with the same four-line body structure
@@ -1412,6 +1608,15 @@ MUST NOT silently pass uncovered entries. The RECOMMENDED behavior is to fetch
 a fresh artifact from `revocation_url` on cache miss, exactly as the checkpoint
 is fetched on cache miss.
 
+**Staleness check.** Verifiers MUST compare the artifact's `tree_size` against
+their most recently verified checkpoint `tree_size` for the same origin. If
+`checkpoint.tree_size - artifact.tree_size > REVOCATION_STALE_THRESHOLD`
+(recommended: `2 * BATCH_SIZE = 32`), the artifact is stale. A stale artifact
+MUST be discarded and re-fetched. If re-fetch fails, apply fail-closed or
+fail-open policy per deployment configuration. An issuer that fails to update
+the revocation artifact alongside each checkpoint will trigger staleness
+rejections at verifiers — this is intentional behavior, not a bug.
+
 **Fail-closed posture (RECOMMENDED).** If no artifact is available (not cached
 and fetch failed or network unavailable), the verifier declines to verify and
 reports the revocation check as failed. A missing artifact cannot be
@@ -1423,15 +1628,35 @@ revocation check passes with a warning in the verification trace. This MUST be
 an explicit deployment configuration. The verification trace MUST clearly
 indicate that the revocation check was skipped.
 
-**Query.** Given a cached artifact covering `entry_index`:
-1. Decode the base64 cascade bytes.
-2. Verify the issuer signature over the four-line body.
+**Artifact load procedure.** When a revocation artifact is fetched (either
+on first load or cache refresh), before storing it:
+1. Parse the four-line body and the signature line.
+2. Verify the issuer signature over the four-line body. If verification fails,
+   discard the artifact entirely. Do not cache it.
+3. Check that `origin` in the body matches the expected origin.
+4. Check that `artifact_type` is `crlite-v1`. Reject unrecognized types.
+5. Decode the base64 cascade bytes. If decoding fails, discard.
+6. Apply the staleness check: if `tree_size` is more than
+   `REVOCATION_STALE_THRESHOLD` entries behind the verifier's latest
+   checkpoint for this origin, discard and apply fail-closed or fail-open
+   policy.
+7. Store the parsed cascade, `tree_size`, and a SHA-256 hash of the raw
+   cascade bytes for later integrity checks.
+
+**Query procedure.** Given a cached, verified artifact:
+1. Verify the stored SHA-256 hash of the cascade bytes matches the cached
+   data. This detects in-memory corruption. If the hash does not match,
+   treat as a cache miss and re-fetch.
+2. Check coverage: if `artifact.tree_size <= entry_index`, the entry is not
+   covered. Attempt re-fetch or apply fail-closed policy.
 3. Call `Query(cascade, entry_index)`.
 4. If `REVOKED`, reject the payload.
 5. If `NOT_REVOKED`, proceed.
 
-Step 2 MUST be performed on every use of a cached artifact, not only at load
-time, to prevent tampering with a cached artifact in memory.
+The issuer signature (step 2 of the load procedure) is verified once per
+artifact, not on every query. The in-cache integrity hash (query step 1)
+is a lightweight substitute that detects corruption without repeated
+asymmetric signature verification overhead.
 
 ### Size Estimates
 
@@ -1595,6 +1820,69 @@ Interop test: verify `pre_recorded_sig` with both implementations using
 `public_key_hex` — both MUST return true. Additionally, each implementation
 signs independently and the other's verify function MUST accept that signature.
 
+### Revocation Vectors
+
+These vectors specify the expected behavior of the cascade construction and
+verifier rejection logic. All implementations MUST pass these before handling
+real revocation artifacts.
+
+**Vector R1: cascade construction — small known set**
+
+```
+Input:
+  R (revoked):      [2, 5]
+  S (valid):        [1, 3, 4, 6, 7, 8]
+  tree_size:        9
+
+Expected queries:
+  Query(cascade, 0)  → NOT_REVOKED  (index 0 excluded from both sets)
+  Query(cascade, 1)  → NOT_REVOKED
+  Query(cascade, 2)  → REVOKED
+  Query(cascade, 3)  → NOT_REVOKED
+  Query(cascade, 4)  → NOT_REVOKED
+  Query(cascade, 5)  → REVOKED
+  Query(cascade, 6)  → NOT_REVOKED
+  Query(cascade, 8)  → NOT_REVOKED
+  Query(cascade, 99) → NOT_REVOKED  (not in either set; still not revoked)
+```
+
+The exact `cascade_bytes` hex for this input MUST be generated by the Go
+reference implementation once implemented, then locked as the normative value.
+All other implementations verify against that hex. This vector will be added
+to `test-vectors/vectors.json` at that time.
+
+**Vector R2: empty revocation set**
+
+```
+Input:
+  R (revoked):  []   (empty)
+  S (valid):    [1, 2, 3, 4, 5]
+
+Expected:
+  cascade bytes:  01 (hex)  — num_levels=0, 1 byte total
+  Query(cascade, 1) → NOT_REVOKED
+  Query(cascade, 2) → NOT_REVOKED
+  Query(cascade, 99) → NOT_REVOKED
+```
+
+**Verifier rejection cases — MUST all result in artifact discard:**
+
+| Case | Input | Required behavior |
+|------|-------|------------------|
+| R-REJ-1 | Valid signature, `num_levels` claims N levels but bytes are truncated after level 0 | Discard: parse error |
+| R-REJ-2 | Valid signature, `bit_count = 0` at any level | Discard: malformed artifact |
+| R-REJ-3 | Signature over correct body, but signed by wrong key | Discard: signature verification failure |
+| R-REJ-4 | Artifact body `origin` does not match expected origin | Discard: origin mismatch |
+| R-REJ-5 | Artifact body `artifact_type` is `crlite-v2` (unrecognized) | Discard: unknown type |
+| R-REJ-6 | Artifact `tree_size` is 0 | Discard: malformed (tree_size must be ≥ 1) |
+| R-REJ-7 | Valid artifact, but `artifact.tree_size` is more than `REVOCATION_STALE_THRESHOLD` behind verifier's checkpoint `tree_size` | Discard: stale artifact |
+| R-REJ-8 | Artifact body has only 3 lines (missing `filter_bytes_base64` line) | Discard: parse error |
+| R-REJ-9 | `filter_bytes_base64` is valid base64 but decoded bytes are not a valid cascade (e.g. `num_levels=5` but only 2 levels of data) | Discard: cascade parse error |
+
+These cases do not require exact byte vectors — they are behavioral requirements.
+Each implementation's test suite MUST cover all nine rejection cases.
+
+
 ---
 
 ## Open Questions
@@ -1622,13 +1910,20 @@ cannot interoperate with standard tlog-checkpoint parsers. The ECDSA registratio
 is the more urgent dependency. The MTC authors and c2sp.org maintainers are the
 right people to engage on these PRs.
 
-**Revocation format: specified, not yet implemented.** The revocation wire
-format, filter cascade construction, delta update protocol, and verifier behavior
-are now defined in the Revocation section. The reference implementations emit
-a documented stub ("not implemented") for the revocation check step. Implementing
-the Bloom filter cascade and delta distribution is the primary remaining v1 task
-for the SDK layer. The Mozilla CRLite implementation (github.com/mozilla/crlite,
-MPL-2.0) is the reference for the cascade construction.
+**Revocation: specified, not yet implemented.** The revocation wire format,
+filter cascade construction, security model, authorization model, rollback
+resistance, and verifier behavior are now defined in §Revocation. The reference
+implementations emit a documented stub ("not implemented") for the revocation
+check step. Implementing the Bloom filter cascade is the primary remaining v1
+task for the SDK layer. The Mozilla CRLite implementation
+(github.com/mozilla/crlite, MPL-2.0) is the reference for the cascade
+construction. Delta updates are deferred to v2.
+
+**Revocation auditability: deferred to v2.** The current protocol has no
+mechanism for independent verification that the issuer's filter correctly
+reflects all revocations made. A v2 extension would commit a hash of the
+revocation artifact into each checkpoint body, making the revocation state
+tamper-evident and verifiable by witnesses. See §Revocation — Auditability.
 
 ### Non-Blocking — Required Before v1 Finalization
 

@@ -516,46 +516,66 @@ honestly.
 
 ### Steps that are legitimately stubbed in the reference implementation
 
-**Revocation (step 9):** the revocation protocol is fully specified in SPEC.md §Revocation.
-The reference implementations still stub this step. The correct stub:
+**Revocation (step 9):** the revocation protocol is fully specified in SPEC.md §Revocation,
+including the security model, authorization model, rollback resistance, and all
+normative construction parameters. The reference implementations still stub this step:
 
 ```
 add("Revocation check", true, "not implemented — no revocation list defined")
 ```
 
+**Security model summary for implementers.** Read SPEC.md §Revocation — Security
+Model before writing any code. Key points that affect implementation decisions:
+
+- The issuer is the sole authority for R. There is no independent check that R
+  is complete. This is a known limitation acknowledged in the spec.
+- Signature verification happens at artifact load time, once. Cache the parsed
+  cascade plus a SHA-256 hash of the raw bytes for in-memory integrity checks.
+- Implement the staleness check: reject artifacts where
+  `checkpoint.tree_size - artifact.tree_size > 2 * BATCH_SIZE`. An issuer that
+  stops updating their revocation artifact will be detected.
+- On first use for an origin, fetch both checkpoint and revocation artifact
+  before accepting any payload. There is no safe baseline without both.
+- An empty cascade (`num_levels=0`) is valid when R is empty. It is not
+  distinguishable from a malicious empty artifact by cryptographic means alone.
+
 **When implementing the cascade construction:**
 
 The construction must be deterministic. Four things must be identical across all
-implementations or your test vectors will fail:
+implementations or test vectors will fail:
 
 1. **Element encoding:** `entry_index` as 8-byte big-endian unsigned integer.
 2. **Hash function:** `bit_position(x, i) = big_endian_uint64(SHA-256(x || uint8(i))[0:8]) mod m`
    where `x` is the 8-byte element and `i` is the level index (0-based).
-3. **Bit array size:** `m = max(ceil(n * 1.44), 64)` rounded up to the nearest
-   multiple of 8. Fixed constant `BITS_PER_ELEMENT = 1.44`.
+3. **Bit array size:** `m = max(ceil(n * 1.44), 64)` rounded up to nearest multiple of 8.
 4. **Insertion order:** ascending `entry_index` within each level.
 
-**Bit encoding:** bit `i` is stored in byte `i/8` at bit position `7 - (i mod 8)` (MSB-first).
+**Bit encoding:** bit `i` in byte `i/8` at position `7 - (i mod 8)` (MSB-first).
 
-**The cascade query alternates interpretation at each level:**
-Level 0 in-filter → tentatively revoked. Level 1 in-filter → false positive, not revoked.
-Level 2 in-filter → false positive of the false positive, revoked again. And so on.
-If any level's bit is 0, return the current interpretation immediately.
+**Query alternation:** Level 0 in-filter → tentatively revoked. Level 1 in-filter
+→ false positive, not revoked. Level 2 in-filter → revoked again. If any level's
+bit is 0, return current interpretation immediately.
 
-**Binary format header per level:** `uint32 bit_count | uint8 k | bit_array bytes`
-(big-endian). Preceded by `uint8 num_levels`.
+**Binary format:** `uint8 num_levels` then per level `uint32 bit_count | uint8 k | bytes`
+(all big-endian).
 
 **Common implementation mistakes:**
 
-- Using little-endian for the element encoding or the bit_count field
+- Little-endian element encoding or bit_count field
 - Off-by-one in the bit array size formula (ceil vs floor)
-- Inserting elements in hash order rather than ascending index order
-- Misimplementing the MSB-first bit encoding (e.g., using LSB-first)
-- Getting the query alternation wrong (inverting the logic at odd levels)
+- Inserting elements in non-ascending order
+- LSB-first bit encoding instead of MSB-first
+- Inverted query alternation at odd levels
+- Verifying signature on every query instead of at load time
+- Missing the staleness check (serving a stale artifact silently)
+- Not checking `origin` in the artifact body against the expected origin
 
-Generate the Go implementation first, emit the test vector bytes from it,
-then verify those exact bytes are reproduced by each other language.
-See SPEC.md §Revocation for the full normative construction.
+**Rejection cases your test suite MUST cover:** See SPEC.md §Test Vectors —
+Revocation Vectors, cases R-REJ-1 through R-REJ-9.
+
+**Implementation sequence:** Go cascade + test vectors → Rust → TypeScript → Java.
+Generate test vector R1 bytes from Go, lock them, verify all other languages
+reproduce the same bytes. See SPEC.md §Revocation for the full normative spec.
 
 **Mode 0:** implement explicit rejection. A Mode 0 payload passed to a Mode 1
 verifier must return a clear error, not silently fall through to the network
