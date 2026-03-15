@@ -1,0 +1,54 @@
+[package]
+name = "mta-qr"
+version = "0.1.0"
+edition = "2021"
+description = "MTA-QR SDK — Merkle Tree Assertions for Verifiable QR Codes"
+license = "Apache-2.0"
+
+[lib]
+name = "mta_qr"
+path = "src/lib.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Crypto
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
+sha2 = "0.10"
+subtle = "2"
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+# ML-DSA-44 (FIPS 204)
+ml-dsa = { version = "0.1.0-rc.7", features = ["rand_core"] }
+
+# CBOR — canonical encoding
+ciborium = "0.2"
+
+# HTTP client for GoodKey (optional)
+reqwest = { version = "0.11", features = ["json"], default-features = false, optional = true }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Base64
+base64 = "0.22"
+
+# Hex encoding
+hex = "0.4"
+
+# URL encoding for GoodKey
+urlencoding = { version = "2", optional = true }
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+[features]
+default = ["goodkey"]
+goodkey = ["dep:reqwest", "reqwest/rustls-tls", "dep:urlencoding"]
+
+[dev-dependencies]
+tokio-test = "0.4"
