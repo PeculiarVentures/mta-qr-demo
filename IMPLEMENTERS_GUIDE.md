@@ -579,6 +579,24 @@ bit is 0, return current interpretation immediately.
 **Rejection cases your test suite MUST cover:** See SPEC.md §Test Vectors —
 Revocation Vectors, cases R-REJ-1 through R-REJ-9.
 
+**Mode 0 and revocation.** Mode 0 payloads carry no `revocation_url`. The
+verifier must check the cache for a previously loaded artifact for this origin.
+Three outcomes are valid; all three MUST appear in the verification trace:
+- Artifact cached: run normal query, record result.
+- No artifact, network available: fetch from `revocation_url` in trust config,
+  run load procedure, query, record result.
+- No artifact, no network: apply configured fail-closed or fail-open posture,
+  record "skipped — no artifact available".
+Silently passing the revocation check when no artifact exists is not acceptable
+regardless of mode.
+
+**Mode and revocation freshness.** Mode 1 revocation is bounded by the charge
+cycle. Mode 2 can fetch a fresh artifact at each scan — use Mode 2 when
+revocation must take effect within minutes rather than within a charge cycle.
+Short credential TTL is an alternative: a 5-minute TTL credential that is
+also revoked will expire before the next charge cycle regardless of artifact
+staleness.
+
 **Implementation sequence:** Go cascade + test vectors → Rust → TypeScript → Java.
 Generate test vector R1 bytes from Go, lock them, verify all other languages
 reproduce the same bytes. See SPEC.md §Revocation for the full normative spec.
