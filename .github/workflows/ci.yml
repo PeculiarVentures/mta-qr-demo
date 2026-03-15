@@ -45,13 +45,13 @@ jobs:
         working-directory: ts
         run: npx tsc --noEmit
 
-      - name: Vector tests
-        working-directory: ts
-        run: npm run test:vectors
+      - name: Install SDK deps
+        working-directory: ts/sdk
+        run: npm ci
 
-      - name: Signing tests
-        working-directory: ts
-        run: npm run test:signing
+      - name: Vector and signing tests (SDK)
+        working-directory: ts/sdk
+        run: npm test
 
   typescript-sdk:
     name: TypeScript SDK tests

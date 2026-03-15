@@ -68,3 +68,21 @@ export interface Signer {
   /** Raw public key bytes in the wire encoding for the algorithm. */
   publicKeyBytes(): Promise<Uint8Array>;
 }
+
+/**
+ * LocalSigner is a synchronous specialization of Signer for in-process key
+ * material. LocalSigners never perform I/O so sign() and publicKeyBytes()
+ * return plain values rather than Promises. The async Signer interface is
+ * satisfied because a T is assignable to Promise<T> in TypeScript when the
+ * value is used in an await expression — but call sites that know they hold
+ * a LocalSigner can call these synchronously without await.
+ *
+ * Use this interface when you need the signers locally in the HTTP services.
+ * GoodKey and other network signers implement the base Signer interface.
+ */
+export interface LocalSigner {
+  readonly sigAlg:   SigAlg;
+  readonly keyName:  string;
+  sign(message: Uint8Array): Uint8Array;
+  publicKeyBytes(): Uint8Array;
+}

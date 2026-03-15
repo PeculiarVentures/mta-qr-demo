@@ -82,3 +82,16 @@ function trimLeadingZeros(b: Uint8Array): Buffer {
   while (i < b.length - 1 && b[i] === 0) i++;
   return Buffer.from(b.slice(i));
 }
+
+// Re-export constants and helpers for callers that import verification only.
+export { SIG_ALG_ED25519, SIG_ALG_ECDSA_P256, SIG_ALG_ML_DSA_44 } from "./signer.js";
+export type { SigAlg } from "./signer.js";
+
+/** Return expected raw signature byte length for sigAlg. */
+export function sigAlgSigLen(sigAlg: SigAlg): number {
+  switch (sigAlg) {
+    case SIG_ALG_ED25519:    return 64;
+    case SIG_ALG_ECDSA_P256: return 64;
+    case SIG_ALG_ML_DSA_44:  return 2420;
+  }
+}

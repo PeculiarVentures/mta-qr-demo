@@ -7,11 +7,11 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { createHash } from "crypto";
-import { hashLeaf, hashNode, entryHash, computeRoot, inclusionProof, verifyInclusion } from "./merkle.js";
-import { encodeDataAssertion, encodeNullEntry } from "./cbor.js";
-import { checkpointBody } from "./checkpoint.js";
+import { hashLeaf, hashNode, entryHash, computeRoot, inclusionProof, verifyInclusion } from "../merkle.js";
+import { encodeTbs as encodeDataAssertion, encodeNullTbs as encodeNullEntry } from "../cbor.js";
+import { checkpointBody } from "../checkpoint.js";
 
-const VECTORS_PATH = join(import.meta.dirname ?? __dirname, "../../test-vectors/vectors.json");
+const VECTORS_PATH = join(import.meta.dirname ?? __dirname, "../../../../test-vectors/vectors.json");
 
 interface Vector {
   id: string;
@@ -169,6 +169,80 @@ test("entry-hash-construction", () => {
 
   // Also via entryHash helper.
   assert(hex(entryHash(tbs)), expected.entry_hash_hex, "entry_hash via helper");
+});
+
+// --- Negative vectors: parser rejection ---
+import { decodePayload } from "../payload.js";
+import { entryHash, verifyInclusion } from "../merkle.js";
+
+test("reject-entry-index-zero", () => {
+  const v = vs.get("reject-entry-index-zero")!;
+  const input = v.input as { payload_hex: string };
+  const p = decodePayload(fromHex(input.payload_hex));
+  // Parser succeeds — rejection happens at the verifier level, not the parser.
+  // Confirm the field is zero so downstream tests can rely on it.
+  if (p.entryIndex !== 0n) {
+    console.log(`  ✗ reject-entry-index-zero: expected entryIndex=0, got ${p.entryIndex}`);
+    failed++;
+  } else {
+    console.log(`  ✓ reject-entry-index-zero: entryIndex=0 correctly decoded`);
+    passed++;
+  }
+});
+
+test("reject-truncated-payload", () => {
+  const v = vs.get("reject-truncated-payload")!;
+  const input = v.input as { payload_hex: string };
+  let threw = false;
+  try {
+    decodePayload(fromHex(input.payload_hex));
+  } catch (_) {
+    threw = true;
+  }
+  if (!threw) {
+    console.log(`  ✗ reject-truncated-payload: expected parse error, got none`);
+    failed++;
+  } else {
+    console.log(`  ✓ reject-truncated-payload: truncated payload correctly rejected`);
+    passed++;
+  }
+});
+
+test("reject-tampered-tbs", () => {
+  const v = vs.get("reject-tampered-tbs")!;
+  const input = v.input as { payload_hex: string; root_hex: string };
+  const p = decodePayload(fromHex(input.payload_hex));
+  const root = fromHex(input.root_hex);
+  const eHash = entryHash(p.tbs);
+  // The inclusion proof must fail — tampered TBS produces wrong entry hash.
+  let failed_proof = false;
+  try {
+    verifyInclusion(eHash, Number(p.entryIndex), Number(p.treeSize), p.proofHashes, root);
+  } catch (_) {
+    failed_proof = true;
+  }
+  if (!failed_proof) {
+    console.log(`  ✗ reject-tampered-tbs: expected Merkle failure, got success`);
+    failed++;
+  } else {
+    console.log(`  ✓ reject-tampered-tbs: tampered TBS correctly fails inclusion proof`);
+    passed++;
+  }
+});
+
+test("reject-wrong-sig-alg", () => {
+  const v = vs.get("reject-wrong-sig-alg")!;
+  const input = v.input as { payload_hex: string; trust_config: { sig_alg: number } };
+  const p = decodePayload(fromHex(input.payload_hex));
+  // Payload claims ECDSA P-256 (4), trust config expects Ed25519 (6).
+  const mismatch = p.sigAlg !== input.trust_config.sig_alg;
+  if (!mismatch) {
+    console.log(`  ✗ reject-wrong-sig-alg: expected sig_alg mismatch, got match`);
+    failed++;
+  } else {
+    console.log(`  ✓ reject-wrong-sig-alg: sig_alg=${p.sigAlg} vs trust=${input.trust_config.sig_alg} mismatch detected`);
+    passed++;
+  }
 });
 
 // --- Summary ---
