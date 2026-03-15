@@ -166,6 +166,12 @@ func loadTrustConfigFromBytes(body []byte) error {
 		copy(kid[:], kidBytes)
 		witnesses[i] = verify.WitnessEntry{Name: wc.Name, KeyID: kid, PubKey: pubBytes}
 	}
+	if tc.WitnessQuorum < 1 {
+		return fmt.Errorf("witness_quorum must be >= 1, got %d", tc.WitnessQuorum)
+	}
+	if tc.WitnessQuorum > len(witnesses) {
+		return fmt.Errorf("witness_quorum (%d) exceeds witness count (%d)", tc.WitnessQuorum, len(witnesses))
+	}
 	v.AddAnchor(&verify.TrustAnchor{
 		Origin: tc.Origin, OriginID: originIDInt, IssuerPubKey: issuerPubBytes,
 		IssuerKeyName: tc.IssuerKeyName,

@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "crypto";
 /**
  * RFC 6962 §2.1 Merkle tree operations for MTA-QR.
  * Leaf hashes: SHA-256(0x00 || data)
@@ -109,10 +110,11 @@ export function verifyInclusion(
     size = Math.floor((size + 1) / 2);
   }
 
-  const computed = Buffer.from(node).toString("hex");
-  const expected = Buffer.from(expectedRoot).toString("hex");
-  if (computed !== expected) {
-    throw new Error(`merkle: root mismatch: computed ${computed}, expected ${expected}`);
+  // timingSafeEqual prevents timing side-channels on the root hash comparison.
+  if (!timingSafeEqual(Buffer.from(node), Buffer.from(expectedRoot))) {
+    throw new Error(
+      `merkle: root mismatch: computed ${Buffer.from(node).toString("hex")},` +
+      ` expected ${Buffer.from(expectedRoot).toString("hex")}`);
   }
 }
 
