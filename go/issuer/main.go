@@ -422,7 +422,9 @@ function addClaimField(k='', v='') {
   const row = document.createElement('div');
   row.className = 'field-row';
   row.style.marginBottom = '8px';
-  row.innerHTML = '<input type="text" placeholder="key" class="claim-key" value="'+k+'"><input type="text" placeholder="value" class="claim-val" value="'+v+'">';
+  const ki = document.createElement('input'); ki.type='text'; ki.placeholder='key';   ki.className='claim-key'; ki.value=k;
+  const vi = document.createElement('input'); vi.type='text'; vi.placeholder='value'; vi.className='claim-val'; vi.value=v;
+  row.appendChild(ki); row.appendChild(vi);
   container.appendChild(row);
 }
 

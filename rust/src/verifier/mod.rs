@@ -422,7 +422,11 @@ pub(crate) fn decode_payload(data: &[u8]) -> Result<DecodedPayload> {
         Some(String::from_utf8(bytes)?)
     } else { None };
 
-    let num_proof   = read_byte(&mut pos)? as usize;
+    let num_proof = read_byte(&mut pos)? as usize;
+    const MAX_PROOF_HASHES: usize = 64;
+    if num_proof > MAX_PROOF_HASHES {
+        return Err(anyhow!("payload: proof_count {} exceeds maximum {}", num_proof, MAX_PROOF_HASHES));
+    }
     let inner_count = read_byte(&mut pos)?;
     let proof_hashes: Result<Vec<Vec<u8>>> = (0..num_proof)
         .map(|_| read_bytes(&mut pos, 32))

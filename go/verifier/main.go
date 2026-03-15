@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/mta-qr/demo/shared/checkpoint"
+	"github.com/mta-qr/demo/shared/signing"
 	"github.com/mta-qr/demo/verifier/verify"
 )
 
@@ -54,6 +55,12 @@ func main() {
 	}
 }
 
+// autoLoadAll fetches trust configs from the URLs in MTA_TRUST_CONFIG_URLS.
+// SECURITY NOTE: trust configs loaded via this path are NOT authenticated —
+// the response is trusted as-is from the given URL. Any attacker who can
+// intercept or replace the response can install arbitrary trusted issuers.
+// Use this only in controlled environments where the URL source is trusted
+// (e.g. an adjacent container in a private Docker network).
 func autoLoadAll(urls []string) {
 	time.Sleep(3 * time.Second)
 	for _, u := range urls {
@@ -160,6 +167,14 @@ func loadTrustConfigFromBytes(body []byte) error {
 	issuerPubBytes, err := hex.DecodeString(tc.IssuerPubKey)
 	if err != nil {
 		return fmt.Errorf("decode issuer pub key: %w", err)
+	}
+	// Validate key length matches the declared algorithm before registering.
+	// A wrong-length key will cause all signature verifications to fail silently
+	// rather than at load time, making misconfiguration hard to diagnose.
+	expectedKeyLen := signing.PubKeyLen(tc.SigAlg)
+	if expectedKeyLen > 0 && len(issuerPubBytes) != expectedKeyLen {
+		return fmt.Errorf("issuer pub key length %d does not match sig_alg=%d (expected %d bytes)",
+			len(issuerPubBytes), tc.SigAlg, expectedKeyLen)
 	}
 	originIDInt, err := strconv.ParseUint(tc.OriginID, 16, 64)
 	if err != nil {
@@ -507,7 +522,15 @@ function setResultPending() {
 function renderError(msg) {
   document.getElementById('result-header').className = 'result-header invalid';
   document.getElementById('result-header').innerHTML = '<div class="result-icon">❌</div><div class="result-text invalid">ERROR</div>';
-  document.getElementById('steps-list').innerHTML = '<div class="step fail"><div class="step-icon">✗</div><div><div class="step-name">Network error</div><div class="step-detail">' + msg + '</div></div></div>';
+  const step = document.createElement('div'); step.className = 'step fail';
+  const icon = document.createElement('div'); icon.className = 'step-icon'; icon.textContent = '✗';
+  const body = document.createElement('div');
+  const nm   = document.createElement('div'); nm.className = 'step-name';   nm.textContent = 'Network error';
+  const dt   = document.createElement('div'); dt.className = 'step-detail'; dt.textContent = msg;
+  body.appendChild(nm); body.appendChild(dt);
+  step.appendChild(icon); step.appendChild(body);
+  document.getElementById('steps-list').innerHTML = '';
+  document.getElementById('steps-list').appendChild(step);
 }
 
 function clearAll() {

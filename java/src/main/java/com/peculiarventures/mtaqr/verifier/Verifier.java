@@ -453,6 +453,10 @@ public final class Verifier {
             origin = new String(originBytes, StandardCharsets.UTF_8);
         }
         int numProof   = buf.get() & 0xff;
+        final int MAX_PROOF_HASHES = 64;
+        if (numProof > MAX_PROOF_HASHES)
+            throw new IllegalArgumentException(
+                "payload: proof_count " + numProof + " exceeds maximum " + MAX_PROOF_HASHES);
         int innerCount = buf.get() & 0xff;
         List<byte[]> proofHashes = new ArrayList<>();
         for (int i = 0; i < numProof; i++) {

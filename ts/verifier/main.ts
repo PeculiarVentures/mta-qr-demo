@@ -526,7 +526,15 @@ async function doVerify() {
     renderResult(d);
   } catch(e) {
     setRhead('invalid','❌','ERROR');
-    document.getElementById('steps').innerHTML='<div class="step fail"><div>✗</div><div><div class="sname">Network error</div><div class="sdetail">'+e.message+'</div></div></div>';
+    const stepEl = document.createElement('div'); stepEl.className = 'step fail';
+    const icon = document.createElement('div'); icon.textContent = '✗';
+    const body = document.createElement('div');
+    const nm = document.createElement('div'); nm.className = 'sname'; nm.textContent = 'Network error';
+    const dt = document.createElement('div'); dt.className = 'sdetail'; dt.textContent = e instanceof Error ? e.message : String(e);
+    body.appendChild(nm); body.appendChild(dt);
+    stepEl.appendChild(icon); stepEl.appendChild(body);
+    const stepsEl = document.getElementById('steps')!;
+    stepsEl.innerHTML = ''; stepsEl.appendChild(stepEl);
   }
 }
 function renderResult(r) {
