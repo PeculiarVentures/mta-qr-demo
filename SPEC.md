@@ -188,10 +188,20 @@ An assertion is valid if:
 That's the entire verification algorithm. Nothing else is required.
 
 The witness quorum provides transparency: it ensures the issuer cannot present
-a different view of the log to different verifiers, and cannot silently retract
-or modify entries after the fact. But witnesses do not grant the issuer
-authority. They police the issuer's behavior against the log they operate.
-Authority comes entirely from the reader's trust configuration tuple.
+a different view of the log to different verifiers. Once a checkpoint has been
+cosigned by witnesses, the issuer cannot retroactively claim that checkpoint
+covered a different set of entries — doing so would require producing a new
+root hash for the same tree_size, which witnesses would reject as an
+inconsistency. Witnesses do not, however, control what the issuer chooses to
+log, prevent entries from expiring, or guarantee that a verifier's checkpoint
+cache is current. The transparency guarantee is specifically that the log is
+append-only and fork-free as seen by the witness network — and only to the
+degree that witnesses are checking consistency before signing, which is what
+the c2sp.org/tlog-witness protocol is designed to enforce.
+
+Witnesses do not grant the issuer authority. They police the issuer's behavior
+against the log they operate. Authority comes entirely from the reader's trust
+configuration tuple.
 
 **Monitoring and transparency for data assertions.** In Certificate
 Transparency, domain owners monitor logs for unauthorized certificate issuance
@@ -1353,9 +1363,11 @@ protocol spec.
 **PQ witness cosignatures.** The tlog-cosignature/v1 spec mandates Ed25519 for
 witness keys. A future v2 will need PQ witness key types. Ed25519 witnesses are
 adequate for the transparency function in the near term — compromising the
-transparency guarantee requires compromising multiple independent witness
-operators simultaneously, a harder attack than the offline key-breaking scenario
-that motivates PQC today.
+transparency guarantee requires either compromising multiple independent witness
+operators simultaneously, or suborning witnesses into signing without checking
+consistency. Both are harder attacks than the offline key-breaking scenario
+that motivates PQC today. The strength of the guarantee therefore depends on
+the integrity of the witness operators chosen, not only their key strength.
 
 ---
 
