@@ -47,11 +47,12 @@ COVID system found painful in practice.
 
 MTA-QR supports short, medium, and long credential lifetimes. TTL-based expiry
 handles short-lived tokens. For medium and long-lived credentials, the protocol
-provides explicit revocation: the issuer publishes revocation ranges via
-`GET /revoked`, and verifiers check `entry_index` against those ranges as part
-of normal verification. Because revocation is distributed on the same charge-cycle
-schedule as checkpoint updates, it inherits the same delivery model as the
-checkpoint — no special infrastructure required. For credentials that must
+provides explicit revocation modeled on CRLite: the issuer constructs a signed
+Bloom filter cascade encoding revoked entry indices and serves it at `GET /revoked`
+on the same charge-cycle schedule as checkpoint updates. Verifiers cache the artifact
+locally and query it at scan time — no network access required. Because the issuer is
+the aggregator (unlike WebPKI CRLite, which needs a third-party aggregator), no
+additional trust infrastructure is needed beyond the existing trust configuration. For credentials that must
 remain verifiable over years, the post-quantum signing posture also matters:
 a credential issued today under a classical algorithm may need to be verifiable
 long after quantum computers make that algorithm breakable.
@@ -170,9 +171,11 @@ The comparison reflects the current protocol design (v0.1). Several properties
 marked as MTA-QR advantages depend on features that are defined in the spec but
 not yet fully implemented in this reference SDK:
 
-- **Auditable revocation** requires a defined revocation list format. The
-  `GET /revoked` URL convention is established but the response format and
-  signing requirement are open items. See SPEC.md §Open Questions.
+- **Auditable revocation** is now fully specified in SPEC.md §Revocation.
+  The format is a signed Bloom filter cascade (modeled on CRLite) distributed
+  at `GET /revoked` on the charge-cycle schedule. The reference implementations
+  still emit a "not implemented" stub — the cascade construction is the
+  primary remaining SDK task before production use.
 - **Mode 0 (fully offline)** is not yet implemented in the server-side verifiers.
   The browser demo and SDK implement Mode 0 verification.
 - **Post-quantum interoperability with the witness network** requires C2SP note

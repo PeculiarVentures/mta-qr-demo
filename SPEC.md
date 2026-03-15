@@ -1173,31 +1173,177 @@ verifiable server identity to prevent MITM substitution of either.
 
 ## Revocation
 
-Revocation by index range, per MTC draft-09 §7.5. Verifiers hold a list of
-revoked `(full_origin, start_index, end_index)` ranges. Any `entry_index`
-within a revoked range for the assertion's `full_origin` is rejected regardless
-of signature validity.
+### Design
 
-The revocation list MUST be keyed on the full origin string, not `origin_id`,
-for the same reason the checkpoint cache MUST be keyed on the full origin string:
-`origin_id` is a routing hint, not a collision-resistant identifier. An issuer
-running two logs with colliding `origin_id` values would see one silently go
-unrevoked.
+Revocation in MTA-QR follows the same architectural pattern as CRLite
+(Larisch et al., IEEE S&P 2017; Schanck, IEEE S&P 2025): the issuer constructs
+a compact probabilistic membership test encoding the revoked set, signs it with
+the same key used to sign checkpoints, and distributes it to verifiers on the
+same charge-cycle schedule as checkpoint updates. Verifiers query the locally
+cached artifact at scan time — no network access required.
 
-The revoked range list is distributed as a separate resource fetched on the
-same charge-cycle schedule as checkpoint updates, by convention at `GET /revoked`
-at the same issuer endpoint.
+This architecture maps directly onto MTA-QR because the issuer is also the
+aggregator. In the WebPKI, CRLite requires a trusted third party to aggregate
+revocation information from many CAs. In MTA-QR, each issuer operates their
+own log and controls their own revocation set. The issuer constructs the filter
+cascade directly — no aggregation step is needed, and the signing key is already
+distributed to verifiers via the trust configuration.
 
-**Revocation list authentication gap.** The current design provides no
-mechanism for verifiers to authenticate that a fetched revocation list was
-produced by the issuer. A network-level attacker can serve an empty or stale
-list. The v1 revocation format MUST define an authentication mechanism — the
-natural approach is an issuer signature over the list using the same key used
-to sign checkpoints. Until a signed format exists, deployments relying on
-revocation for security-critical decisions SHOULD serve `GET /revoked` over
-mutually authenticated TLS. The revocation format and URL convention are
-established but the response structure and signing requirement are open items
-for v1 — see Open Questions.
+### The Two-Set Construction
+
+The filter cascade encodes two disjoint sets derived from the log:
+
+- **R (revoked):** the set of `entry_index` values the issuer has revoked.
+- **S (valid, non-revoked):** the set of `entry_index` values that have been
+  issued, have not expired, and have not been revoked.
+
+The universe is all issued indices: indices 1 through `tree_size - 1`, excluding
+index 0 (the reserved null entry). Expired entries MAY be excluded from both R
+and S — they are already rejected by the expiry check and need not consume space
+in the filter.
+
+A Bloom filter cascade over (R, S) produces a structure with zero false negatives
+(a revoked entry is never reported as valid) and a tunable false positive rate
+(a valid entry may be reported as revoked). The false positive direction is
+deliberately conservative: a false positive causes the verifier to incorrectly
+reject a valid assertion, but never to incorrectly accept a revoked one.
+
+The cascade construction proceeds per Larisch et al. §III: a Level 0 filter
+encodes R against the universe (R ∪ S). Its false positive set — entries in S
+that hash as members of R — is encoded in a Level 1 filter. This continues until
+the false positive set is empty. Approximately log₂(1/ε) levels are needed,
+where ε is the per-level false positive rate. A false positive rate of ~50% per
+level (1 bit per element) is close to optimal for cascade construction. The total
+size is approximately 1.44 × |R| bits plus metadata.
+
+For high-volume issuers, the Clubcard construction (Schanck, IEEE S&P 2025)
+reduces artifact size by ~54% by partitioning the revoked set by issuer
+substructure or expiry window before building the cascade. For MTA-QR issuers
+operating a single log, the partitioning dimension is expiry time: entries
+expiring in similar windows can be grouped, reducing the effective universe size
+for each partition. The reference implementation (github.com/mozilla/crlite,
+MPL-2.0) is directly applicable.
+
+### Wire Format
+
+The revocation artifact is a signed note with the same structure as a checkpoint:
+
+```
+<origin>
+
+<tree_size decimal>
+
+<artifact_type>
+
+<filter_bytes_base64>
+
+
+— <issuer_key_name> <base64(4_byte_key_hash || issuer_signature)>
+```
+
+The body (four lines, each `
+`-terminated) is what the issuer signature covers.
+Field definitions:
+
+| Field | Description |
+|-------|-------------|
+| `origin` | Full UTF-8 origin string, identifying the log |
+| `tree_size` | The log's `tree_size` at artifact generation time. Entries with `entry_index >= tree_size` are not covered and MUST be treated as not-revoked by this artifact. |
+| `artifact_type` | `crlite-v1` for a full Bloom filter cascade; `crlite-v1-delta` for a delta update. |
+| `filter_bytes_base64` | Standard base64 (RFC 4648 §4) encoding of the cascade bytes. |
+
+The issuer signature is over the four-line body using the same algorithm and key
+identified by `issuer_key_name` in the trust configuration. Verifiers MUST verify
+this signature before trusting the artifact. An artifact with an invalid signature
+MUST be discarded and the verifier MUST behave as if no revocation artifact is
+available (fail-closed: treat the entry as potentially revoked and decline to
+verify).
+
+### Distribution
+
+The artifact is served at `GET /revoked` at the same base URL as `GET /checkpoint`.
+Verifiers fetch it on the same charge-cycle schedule as checkpoint updates.
+
+**Full artifact (`GET /revoked`):** A complete Bloom filter cascade covering all
+issued non-expired entries. Verifiers that have no cached artifact, or whose
+cached artifact covers a `tree_size` more than `REVOKED_MAX_DELTA_SPAN` entries
+old, MUST fetch the full artifact.
+
+**Delta updates (`GET /revoked/delta/{n}`):** An additive delta encoding the
+difference between the artifact at `tree_size = n` and the current artifact.
+Since revocations are monotone — entries are never un-revoked — deltas are
+purely additive and can be applied via XOR to the corresponding cascade level,
+per the CRLite delta construction. Verifiers apply deltas in sequence from their
+last full artifact to the current `tree_size`.
+
+Issuers SHOULD publish delta updates every time a new checkpoint is published.
+Issuers SHOULD publish a new full artifact at least once per validity window
+of the shortest-lived credential they issue.
+
+### Verifier Behavior
+
+At scan time, the verifier queries the locally cached revocation artifact:
+
+1. If no artifact is cached, or the cached artifact's `tree_size < entry_index + 1`,
+   the entry is not covered. Verifiers MUST NOT silently pass uncovered entries.
+   The RECOMMENDED behavior is to attempt a network fetch of the artifact on
+   cache miss (same as checkpoint cache miss), and to fail-closed if the fetch
+   fails or the network is unavailable.
+
+2. If an artifact is cached and covers the entry (`tree_size > entry_index`),
+   query the cascade: if the result is "revoked", reject the entry. If the
+   result is "not revoked", proceed (accepting the false positive rate).
+
+3. The revocation artifact MUST be keyed on the full origin string, not
+   `origin_id`. Cache eviction and delta application MUST use `(full_origin,
+   tree_size)` as the key.
+
+**Fail-closed posture.** A missing, expired, or unauthenticated revocation
+artifact means the verifier cannot confirm the entry is not revoked. Verifiers
+MUST fail-closed in this case — either attempt a network fetch or decline to
+verify the payload. Silently skipping the revocation check when no artifact
+is available is NOT permitted in security-critical deployments.
+
+**Fail-open option for low-security deployments.** Verifiers in deployments
+where revocation is a best-effort concern (not a hard security requirement) MAY
+configure a fail-open posture for the revocation step. This MUST be an explicit
+deployment configuration, not a default. The verification trace MUST indicate
+that the revocation check was skipped due to missing artifact.
+
+### Size Estimates
+
+For a log with 10,000 issued entries and 100 revocations (1% revocation rate):
+
+| Artifact | Estimated size |
+|---------|--------------|
+| Full Bloom cascade | ~200 bytes |
+| Delta (100 new revocations) | ~150 bytes |
+
+For a log with 1,000,000 issued entries and 10,000 revocations (1% revocation rate):
+
+| Artifact | Estimated size |
+|---------|--------------|
+| Full Bloom cascade | ~18 KB |
+| Full Clubcard (issuer-partitioned) | ~8 KB |
+| 6-hour delta | ~1–2 KB |
+
+These are well within the charge-cycle bandwidth budget. The WebPKI CRLite
+deployment (900 million certificates, 8 million revoked) requires 6.7 MB for a
+full Clubcard artifact and 26.8 KB per 6-hour delta. MTA-QR issuers operate at
+orders of magnitude smaller scale.
+
+### References
+
+- Larisch, Choffnes, Levin, Maggs, Mislove, Wilson. "CRLite: A Scalable System
+  for Pushing All TLS Revocations to All Browsers." IEEE S&P 2017, pp. 539–556.
+  https://ieeexplore.ieee.org/document/7958597
+- Schanck. "Clubcards for the WebPKI: smaller certificate revocation tests in
+  theory and practice." IEEE S&P 2025.
+  https://research.mozilla.org/files/2025/04/clubcards_for_the_webpki.pdf
+- Mozilla CRLite reference implementation (MPL-2.0):
+  https://github.com/mozilla/crlite
+- Mozilla Clubcard library (MPL-2.0):
+  https://github.com/mozilla/clubcard
 
 ---
 
@@ -1358,12 +1504,13 @@ cannot interoperate with standard tlog-checkpoint parsers. The ECDSA registratio
 is the more urgent dependency. The MTC authors and c2sp.org maintainers are the
 right people to engage on these PRs.
 
-**Revocation list format and authentication.** The `GET /revoked` URL convention
-is established but the response format is not defined. The v1 revocation format
-MUST define both the list structure and an authentication mechanism (an issuer
-signature over the list using the same key used to sign checkpoints). Until a
-signed format exists, deployments relying on revocation for security-critical
-decisions SHOULD serve `GET /revoked` over mutually authenticated TLS.
+**Revocation format: specified, not yet implemented.** The revocation wire
+format, filter cascade construction, delta update protocol, and verifier behavior
+are now defined in the Revocation section. The reference implementations emit
+a documented stub ("not implemented") for the revocation check step. Implementing
+the Bloom filter cascade and delta distribution is the primary remaining v1 task
+for the SDK layer. The Mozilla CRLite implementation (github.com/mozilla/crlite,
+MPL-2.0) is the reference for the cascade construction.
 
 ### Non-Blocking — Required Before v1 Finalization
 
