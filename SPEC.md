@@ -877,16 +877,22 @@ packages. Any issuer whose verifiers have a charge cycle.
 ### Mode 2: Online Reference
 
 The QR payload contains only the assertion content and log coordinates.
-The verifier fetches the inclusion proof and checkpoint on demand.
+The verifier fetches the inclusion proof from a tile server and the checkpoint
+from the issuer's endpoint at scan time.
 
-Mode 2 provides weaker tamper-evidence guarantees than Modes 0 and 1. A
-compromised or MITM'd server can fabricate an inclusion proof at scan time.
-Mode 2 deployments MUST serve the inclusion proof endpoint over TLS with
-verifiable server identity. Mode 2 SHOULD NOT be used in deployments where
-tamper-evidence against a compromised infrastructure operator is a requirement.
+The security properties of a correctly verified Mode 2 payload are identical
+to Mode 1. The inclusion proof is cryptographically verifiable regardless of
+how it was delivered: any proof must lead to a root the witnesses have cosigned,
+and producing a valid proof for an entry that was never logged would require
+breaking SHA-256. The verifier checks the math either way.
+
+The practical difference from Mode 1 is operational: Mode 1 works offline
+after a prefetch; Mode 2 requires network access at scan time to fetch the
+checkpoint and inclusion proof. Mode 2 deployments MUST serve both endpoints
+over TLS with verifiable server identity.
 
 **Best for:** High-throughput fixed-infrastructure scanning where connectivity
-is guaranteed and the infrastructure operator is fully trusted.
+is guaranteed and the smallest possible payload size is a priority.
 
 ---
 
@@ -1085,8 +1091,9 @@ at scan time.
 complete Mode 2 verification algorithm for implementors building a production
 Mode 2 scanner. The reference SDK validates everything up to step 6 and then
 returns a result with `mode=2` without completing steps 7–8. Callers must
-check the `mode` field on the result and treat Mode 2 results as
-inclusion-unverified.
+check the `mode` field on the result and gate on it — a Mode 2 result from
+this SDK has not verified inclusion, because the tile fetch is not implemented,
+not because inclusion proof verification is inherently weaker in Mode 2.
 
 ```
 1.  Decode MTAQRPayload binary. Confirm proof_count == 0.
@@ -1117,11 +1124,16 @@ inclusion-unverified.
 9.  Decode entry_type_byte and act on claims.
 ```
 
-**Security note.** Steps 5–7 require network access at scan time and the
-server provides the proof. A compromised or MITM'd server can fabricate an
-inclusion proof. Mode 2 deployments MUST serve the tile endpoint over TLS with
-verifiable server identity. Mode 2 SHOULD NOT be used where tamper-evidence
-against a compromised infrastructure operator is a security requirement.
+**Security note.** Steps 5–7 require network access at scan time. The
+checkpoint (step 5) is verified against the trust configuration exactly as in
+Mode 1 — the issuer signature and witness cosignatures are checked
+cryptographically and cannot be fabricated. The inclusion proof (step 7) is
+also cryptographically verifiable: a valid proof must lead to the witnessed
+root hash, and constructing a false proof for an entry that was never logged
+would require breaking SHA-256. The security properties of a correctly
+completed Mode 2 verification are therefore identical to Mode 1. Mode 2
+deployments MUST serve both the checkpoint and tile endpoints over TLS with
+verifiable server identity to prevent MITM substitution of either.
 
 ---
 

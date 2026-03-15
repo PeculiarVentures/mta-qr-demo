@@ -104,7 +104,7 @@ MTA-QR has three payload modes defined in the protocol. Modes 1 and 2 are implem
 
 **Mode 1 — cached checkpoint (offline after prefetch).** The payload includes the inclusion proof but not the checkpoint. The verifier resolves the checkpoint from its local cache; on cache miss it fetches once and caches the result. This is the default mode and the right choice for most deployments.
 
-**Mode 2 — online reference.** The payload contains only the log coordinates — no proof hashes. A scanner fetches the inclusion proof and checkpoint at scan time from a tile server. Smallest payload. Weaker tamper-evidence than Mode 1 (a compromised server can fabricate a proof). **The SDK verifier does not implement tile fetching** — it validates the checkpoint and TBS but skips the inclusion proof step. Use Mode 1 unless you are building your own tile-fetching scanner. See the Mode 2 limitation in Known Limitations.
+**Mode 2 — online reference.** The payload contains only the log coordinates — no proof hashes. A scanner fetches the checkpoint from the issuer's endpoint and the inclusion proof from a tile server at scan time. Smallest payload. The security properties of a correctly verified Mode 2 payload are identical to Mode 1 — the inclusion proof is cryptographically verifiable regardless of how it was delivered. The practical difference is operational: Mode 2 requires network access at scan time. **The SDK verifier does not implement tile fetching** — it validates the checkpoint and TBS but does not complete the inclusion proof step. Use Mode 1 when offline verification matters. See the Mode 2 limitation in Known Limitations.
 
 ### Mode 1 — inclusion proof embedded (48 cells)
 
@@ -127,7 +127,7 @@ The issuer computes and embeds a two-phase tiled Merkle proof at issuance time. 
 
 ### Mode 2 — proof deferred (48 cells)
 
-The issuer emits no proof hashes. In production a scanner fetches proof tiles from a tile server at scan time. The SDK verifier validates everything except inclusion (checkpoint, witnesses, TBS, expiry, `entry_index < tree_size`). See the Mode 2 limitation below.
+The issuer emits no proof hashes. In production a scanner fetches the checkpoint and inclusion proof at scan time and verifies them cryptographically — Mode 2 has the same security properties as Mode 1 when fully implemented. The reference SDK validates checkpoint, witnesses, TBS, and expiry but does not implement tile fetching. See the Mode 2 limitation below.
 
 | Issuer | Algorithm | Go | TS | Rust | Java |
 |--------|-----------|:--:|:--:|:----:|:----:|
@@ -180,7 +180,7 @@ Issuer.builder().origin("...").mode(2).signer(signer).build()
 
 The `VerifyOk`/`VerifyResult` returned by `verify()` includes a `mode` field so callers can distinguish the two cases.
 
-**Mode 2 limitation.** This SDK's verifier does **not** verify Merkle inclusion for Mode 2 payloads. It validates the checkpoint, witness cosignatures, TBS structure, expiry, and `entry_index < tree_size`, but returns a successful result without cryptographic proof that the entry is in the log. Building a complete Mode 2 scanner requires a tile server and tile-fetching logic on top of this library. Use Mode 1 if you need guaranteed inclusion proof at verify time.
+**Mode 2 tile fetching not implemented.** This SDK's verifier does **not** fetch or verify the inclusion proof for Mode 2 payloads. It validates the checkpoint, witness cosignatures, TBS structure, expiry, and `entry_index < tree_size`, then returns a result marked `mode=2`. The inclusion proof is cryptographically verifiable — when a complete Mode 2 scanner fetches the proof and checks it against the witnessed root, the security properties are identical to Mode 1. Building that scanner requires a tile-fetching implementation and a defined tile server API, neither of which exists yet. Use Mode 1 when you need inclusion proof verification today.
 
 ---
 
