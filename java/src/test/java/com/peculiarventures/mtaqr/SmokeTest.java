@@ -40,9 +40,11 @@ public class SmokeTest {
         var qr = issuer.issue(Map.of("subject", "test"), Duration.ofHours(1)).get();
         TrustConfig trust = TrustConfig.parse(issuer.trustConfigJson("http://localhost:0/checkpoint"));
         String note = issuer.checkpointNote();
+        String revArtifact = issuer.revocationArtifact();
         Verifier v = Verifier.builder()
             .trust(trust)
             .noteProvider(url -> CompletableFuture.completedFuture(note))
+            .revocationProvider(url -> CompletableFuture.completedFuture(revArtifact))
             .build();
 
         var result = v.verify(qr.payload()).get();
@@ -61,9 +63,11 @@ public class SmokeTest {
 
         TrustConfig trust = TrustConfig.parse(issuer.trustConfigJson("http://localhost:0/checkpoint"));
         String note = issuer.checkpointNote();
+        String revArtifact = issuer.revocationArtifact();
         Verifier v = Verifier.builder()
             .trust(trust)
             .noteProvider(url -> CompletableFuture.completedFuture(note))
+            .revocationProvider(url -> CompletableFuture.completedFuture(revArtifact))
             .build();
 
         assertThrows(Exception.class, () -> v.verify(tampered).get(), label + ": tampered payload should fail");

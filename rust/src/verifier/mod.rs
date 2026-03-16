@@ -63,25 +63,30 @@ impl TraceResult {
 /// A function that provides checkpoint notes without HTTP. Used in tests.
 pub type NoteProvider = Box<dyn Fn(&str) -> Result<String> + Send + Sync>;
 
+/// Cached revocation artifact per origin.
+struct CachedRevocation {
+    cascade:   crate::cascade::Cascade,
+    tree_size: u64,
+}
+
 /// The MTA-QR verifier.
 pub struct Verifier {
     trust:         TrustConfig,
     note_provider: Option<NoteProvider>,
-    // Bounded cache: VecDeque tracks insertion order for eviction.
-    // Capped at MAX_CACHE_ENTRIES to prevent memory exhaustion.
-    cache: Mutex<(VecDeque<String>, HashMap<String, Vec<u8>>)>,
+    cache:       Mutex<(VecDeque<String>, HashMap<String, Vec<u8>>)>,
+    revoc_cache: Mutex<HashMap<String, CachedRevocation>>,
 }
 
 impl Verifier {
     /// Create a Verifier from a trust config.
     pub fn new(trust: TrustConfig) -> Self {
-        Self { trust, note_provider: None, cache: Mutex::new((VecDeque::new(), HashMap::new())) }
+        Self { trust, note_provider: None, cache: Mutex::new((VecDeque::new(), HashMap::new())), revoc_cache: Mutex::new(HashMap::new()) }
     }
 
     /// Create a Verifier that fetches checkpoint notes via `provider`.
     /// Used in tests to avoid HTTP.
     pub fn with_note_provider(trust: TrustConfig, provider: NoteProvider) -> Self {
-        Self { trust, note_provider: Some(provider), cache: Mutex::new((VecDeque::new(), HashMap::new())) }
+        Self { trust, note_provider: Some(provider), cache: Mutex::new((VecDeque::new(), HashMap::new())), revoc_cache: Mutex::new(HashMap::new()) }
     }
 
     /// Verify a QR code payload. Returns `Ok(VerifyOk)` or `Err(VerifyFail)`.
@@ -237,13 +242,14 @@ impl Verifier {
         };
         add!(true, "cbor decode", format!("schema_id={schema_id} issued={issued_at} expires={expires_at}"));
 
-        // 10. Revocation check.
-        // The revocation protocol is fully specified in SPEC.md §Revocation:
-        // a Bloom filter cascade over revoked/valid entry indices, signed with
-        // the issuer key, served at GET /revoked (self.trust.revocation_url).
-        // TODO: implement cascade fetch, cache, staleness check, and query.
-        // Fail-open is NOT the correct default. See issue #14.
-        add!(false, "revocation check", "not implemented — stub only, revocation not checked");
+        // 10. Revocation check — SPEC.md §Revocation.
+        {
+            let revoc = self.check_revocation(p.entry_index, p.tree_size).await;
+            match revoc {
+                Ok(ref msg)  => { add!(true,  "revocation check", msg.as_str()); }
+                Err(ref msg) => { fail!("revocation check", msg.as_str()); }
+            }
+        }
 
         // 11. Expiry
         let now = std::time::SystemTime::now()
@@ -369,6 +375,132 @@ impl Verifier {
         }
 
         Ok((root_hash, tree_size))
+    }
+    /// Revocation check — SPEC.md §Revocation — Verifier Behavior.
+    async fn check_revocation(&self, entry_index: u64, checkpoint_tree_size: u64) -> Result<String, String> {
+        if self.trust.revocation_url.is_empty() {
+            return Ok("skipped — no revocation_url in trust config (fail-open)".into());
+        }
+
+        const STALE_THRESHOLD: u64 = 32; // 2 × BATCH_SIZE
+
+        // Check cache (and staleness).
+        let cached_opt = {
+            let cache = self.revoc_cache.lock().unwrap();
+            cache.get(&self.trust.origin).map(|c| (c.tree_size, c.cascade.query(entry_index)))
+        };
+
+        // Attempt to use cache if not stale.
+        if let Some((tree_size, _)) = cached_opt {
+            if checkpoint_tree_size <= tree_size ||
+               checkpoint_tree_size - tree_size <= STALE_THRESHOLD
+            {
+                // Cache is fresh — use it.
+                let revoked = cached_opt.unwrap().1;
+                return if revoked {
+                    Err(format!("entry_index={entry_index} is revoked"))
+                } else {
+                    Ok(format!("entry_index={entry_index} not revoked (cascade checked, artifact tree_size={tree_size})"))
+                };
+            }
+        }
+
+        // Cache miss or stale — fetch.
+        let artifact = self.fetch_revocation_artifact().await
+            .map_err(|e| format!("no revocation artifact (fail-closed): {e}"))?;
+
+        let result = if artifact.cascade.query(entry_index) {
+            Err(format!("entry_index={entry_index} is revoked"))
+        } else {
+            Ok(format!("entry_index={entry_index} not revoked (cascade checked, artifact tree_size={})", artifact.tree_size))
+        };
+
+        // Coverage check.
+        if artifact.tree_size <= entry_index {
+            return Err(format!(
+                "entry_index={entry_index} not covered by artifact (tree_size={}) — fail-closed",
+                artifact.tree_size
+            ));
+        }
+
+        self.revoc_cache.lock().unwrap().insert(self.trust.origin.clone(), artifact);
+        result
+    }
+
+    /// Fetch and parse the revocation artifact from revocation_url.
+    async fn fetch_revocation_artifact(&self) -> Result<CachedRevocation> {
+        let url = &self.trust.revocation_url;
+        let raw = {
+            #[cfg(feature = "goodkey")]
+            {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()?;
+                let bytes = client.get(url).send().await
+                    .map_err(|e| anyhow!("GET {url}: {e}"))?.bytes().await
+                    .map_err(|e| anyhow!("read: {e}"))?;
+                if bytes.len() > 64 * 1024 {
+                    return Err(anyhow!("revocation artifact too large ({} bytes)", bytes.len()));
+                }
+                String::from_utf8(bytes.to_vec())?
+            }
+            #[cfg(not(feature = "goodkey"))]
+            { return Err(anyhow!("HTTP not available without 'goodkey' feature")); }
+        };
+        self.parse_revocation_artifact(&raw)
+    }
+
+    /// Parse and verify a revocation artifact string.
+    fn parse_revocation_artifact(&self, text: &str) -> Result<CachedRevocation> {
+        let (body_part, sig_part) = text.split_once("\n\n")
+            .ok_or_else(|| anyhow!("revocation artifact: missing blank line"))?;
+        let body = format!("{body_part}\n");
+        let lines: Vec<&str> = body_part.splitn(4, '\n').collect();
+        if lines.len() != 4 {
+            return Err(anyhow!("revocation artifact: expected 4 body lines, got {}", lines.len()));
+        }
+        let (origin, tree_size_str, artifact_type, casc_b64) =
+            (lines[0], lines[1], lines[2], lines[3]);
+
+        if origin != self.trust.origin {
+            return Err(anyhow!("revocation artifact: origin mismatch"));
+        }
+        if artifact_type != "mta-qr-revocation-v1" {
+            return Err(anyhow!("revocation artifact: unknown type {artifact_type:?}"));
+        }
+        let tree_size: u64 = tree_size_str.parse()
+            .map_err(|_| anyhow!("revocation artifact: invalid tree_size"))?;
+        if tree_size == 0 {
+            return Err(anyhow!("revocation artifact: tree_size=0"));
+        }
+
+        let casc_bytes = B64.decode(casc_b64)
+            .map_err(|e| anyhow!("revocation artifact: base64: {e}"))?;
+
+        // Signature verification — algorithm binding per SPEC.md.
+        let body_bytes = body.as_bytes();
+        let key_prefix = format!("— {} ", self.trust.issuer_key_name);
+        let mut sig_ok = false;
+        for line in sig_part.lines() {
+            if !line.starts_with(&key_prefix) { continue; }
+            if let Some(raw) = last_field_base64(line) {
+                if raw.len() >= 4 {
+                    let sig = &raw[4..]; // strip key hash
+                    if verify(self.trust.sig_alg, body_bytes, sig, &self.trust.issuer_pub_key) {
+                        sig_ok = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !sig_ok {
+            return Err(anyhow!("revocation artifact: signature verification failed"));
+        }
+
+        let cascade = crate::cascade::Cascade::decode(&casc_bytes)
+            .map_err(|e| anyhow!("revocation artifact: cascade decode: {e}"))?;
+
+        Ok(CachedRevocation { cascade, tree_size })
     }
 }
 
