@@ -15,6 +15,7 @@ import {
 import { ed25519FromSeed, ecdsaP256FromScalar, mlDsa44FromSeed, newEd25519, newECDSAP256, newMLDSA44, SIG_ALG_ED25519, SIG_ALG_ECDSA_P256, SIG_ALG_MLDSA44, sigAlgName } from "../sdk/src/signers/local.js";
 import type { LocalSigner } from "../sdk/src/signer.js";
 import { encodePayload, MODE_CACHED, WitnessCosig } from "../sdk/src/payload.js";
+import { Cascade } from "../sdk/src/cascade.js";
 
 const ORIGIN = process.env.MTA_ORIGIN ?? "demo.mta-qr.example/ts-issuer/v1";
 const PORT   = parseInt(process.env.MTA_PORT ?? "3001", 10);
@@ -64,7 +65,9 @@ interface Batch { entries: LogEntry[]; root: Uint8Array; }
 // ── Log state ──────────────────────────────────────────────────────────────
 const batches:      Batch[] = [];   // completed batches
 let   currentBatch: LogEntry[] = []; // in-progress batch
-let   latestCkpt:   SignedCheckpoint | null = null;
+let   latestCkpt:        SignedCheckpoint | null = null;
+const revokedIndices   = new Set<bigint>();
+let   latestRevArtifact: string | null = null;
 
 function totalEntries(): number {
   return batches.reduce((n, b) => n + b.entries.length, 0) + currentBatch.length;
@@ -108,7 +111,67 @@ function publishCheckpoint(): SignedCheckpoint {
     return { keyId: w.keyId, timestamp: ts, signature: s64 };
   });
   latestCkpt = { treeSize, rootHash: parentRoot, body, issuerSig: isig, cosigs };
+  latestRevArtifact = buildRevocationArtifact(treeSize);
   return latestCkpt;
+}
+
+function buildRevocationArtifact(treeSize: number): string {
+  // Build R (revoked) and S (valid non-revoked, non-expired).
+  // Index 0 (null entry) is always excluded per SPEC.md §Revocation.
+  const now = BigInt(Math.floor(Date.now() / 1000));
+  const revoked: bigint[] = [];
+  const valid:   bigint[] = [];
+
+  const allBatchEntries = [
+    ...batches.flatMap(b => b.entries),
+    ...currentBatch,
+  ];
+  for (const e of allBatchEntries) {
+    if (e.index === 0) continue;
+    const idx = BigInt(e.index);
+    if (revokedIndices.has(idx)) { revoked.push(idx); continue; }
+    // Exclude expired entries — decode expiry_time from TBS CBOR field 2.
+    const exp = entryExpiryTime(e.tbs);
+    if (exp > 0n && exp < now) continue;
+    valid.push(idx);
+  }
+
+  const casc = Cascade.build(revoked, valid);
+  const cascBytes = casc.encode();
+  const cascB64 = Buffer.from(cascBytes).toString("base64");
+  const body = `${ORIGIN}\n${treeSize}\nmta-qr-revocation-v1\n${cascB64}\n`;
+
+  // Sign with issuer key — same key as checkpoints.
+  const sig = issuerSigner.sign(new TextEncoder().encode(body));
+  const keyId = issuerKeyId();
+  const sigBytes = new Uint8Array(4 + sig.length);
+  sigBytes.set(keyId, 0);
+  sigBytes.set(sig, 4);
+  const sigLine = `\n\u2014 ${issuerSigner.keyName} ${Buffer.from(sigBytes).toString("base64")}\n`;
+  return body + sigLine;
+}
+
+function issuerKeyId(): Uint8Array {
+  // 4-byte key hash per c2sp.org/signed-note: SHA-256(name || 0x0A || 0x01 || pubkey)[0:4]
+  const name = issuerSigner.keyName;
+  const pub  = issuerSigner.publicKeyBytes();
+  const buf  = new Uint8Array(name.length + 1 + 1 + pub.length);
+  new TextEncoder().encodeInto(name, buf);
+  buf[name.length]     = 0x0a;
+  buf[name.length + 1] = 0x01;
+  buf.set(pub, name.length + 2);
+  const h = createHash("sha256").update(buf).digest();
+  return h.subarray(0, 4);
+}
+
+function entryExpiryTime(tbs: Uint8Array): bigint {
+  // TBS[0] is entry_type_byte; 0x01 = data assertion.
+  // CBOR map key 2 → [issuance_time, expiry_time].
+  if (tbs.length < 2 || tbs[0] !== 0x01) return 0n;
+  try {
+    const decoded = decodeDataAssertion(tbs);
+    return BigInt(decoded.times[1]);
+  } catch { return 0n; }
 }
 
 function buildMode1Payload(entryIdx: number, tbs: Uint8Array): Uint8Array {
@@ -214,6 +277,29 @@ const server = createServer(async (req, res) => {
     return text(res, note);
   }
 
+  // GET /revoked — signed revocation artifact
+  if (req.method === "GET" && url.pathname === "/revoked") {
+    if (!latestRevArtifact) {
+      res.writeHead(503); res.end("no revocation artifact available"); return;
+    }
+    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8",
+                          "Access-Control-Allow-Origin": "*" });
+    res.end(latestRevArtifact);
+    return;
+  }
+
+  // POST /revoke — demo endpoint to revoke an entry by index
+  if (req.method === "POST" && url.pathname === "/revoke") {
+    let body: { entry_index?: number };
+    try { body = JSON.parse(await readBody(req)); } catch { return json(res, { error: "bad JSON" }, 400); }
+    const idx = BigInt(body.entry_index ?? -1);
+    if (idx <= 0n) return json(res, { error: "entry_index must be > 0" }, 400);
+    if (idx >= BigInt(totalEntries())) return json(res, { error: "entry_index not yet issued" }, 400);
+    revokedIndices.add(idx);
+    latestRevArtifact = buildRevocationArtifact(totalEntries());
+    return json(res, { revoked: true });
+  }
+
   // GET /trust-config
   if (req.method === "GET" && url.pathname === "/trust-config") {
     const baseURL = (process.env.MTA_BASE_URL ?? `http://localhost:${PORT}`).replace(/\/$/, "");
@@ -225,6 +311,7 @@ const server = createServer(async (req, res) => {
       sig_alg:            issuerSigner.sigAlg,
       witness_quorum:     witnesses.length,
       checkpoint_url:     `${baseURL}/checkpoint`,
+      revocation_url:    `${baseURL}/revoked`,
       batch_size:         BATCH_SIZE,
       witnesses: witnesses.map(w => ({
         name:        w.name,

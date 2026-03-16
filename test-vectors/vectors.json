@@ -215,6 +215,100 @@
         "valid": false,
         "reject_reason": "sig_alg mismatch: payload=4 (ECDSA P-256), trust config=6 (Ed25519)"
       }
+    },
+    {
+      "id": "revocation-cascade-r1",
+      "description": "Bloom filter cascade over R={2,5} and S={1,3,4,6,7,8}. SPEC.md Vector R1.",
+      "input": {
+        "revoked_indices": [
+          2,
+          5
+        ],
+        "valid_indices": [
+          1,
+          3,
+          4,
+          6,
+          7,
+          8
+        ]
+      },
+      "expected": {
+        "cascade_hex": "01000000080112",
+        "queries": [
+          {
+            "index": 0,
+            "revoked": false
+          },
+          {
+            "index": 1,
+            "revoked": false
+          },
+          {
+            "index": 2,
+            "revoked": true
+          },
+          {
+            "index": 3,
+            "revoked": false
+          },
+          {
+            "index": 4,
+            "revoked": false
+          },
+          {
+            "index": 5,
+            "revoked": true
+          },
+          {
+            "index": 6,
+            "revoked": false
+          },
+          {
+            "index": 7,
+            "revoked": false
+          },
+          {
+            "index": 8,
+            "revoked": false
+          },
+          {
+            "index": 99,
+            "revoked": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "revocation-cascade-r2",
+      "description": "Empty revocation set. num_levels=0. SPEC.md Vector R2.",
+      "input": {
+        "revoked_indices": [],
+        "valid_indices": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "expected": {
+        "cascade_hex": "00",
+        "queries": [
+          {
+            "index": 1,
+            "revoked": false
+          },
+          {
+            "index": 2,
+            "revoked": false
+          },
+          {
+            "index": 99,
+            "revoked": false
+          }
+        ]
+      }
     }
   ]
 }

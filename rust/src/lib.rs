@@ -37,6 +37,7 @@
 //! }
 //! ```
 
+pub mod cascade;
 pub mod signing;
 pub mod signers;
 pub mod trust;
@@ -288,5 +289,39 @@ mod vector_tests {
         assert_ne!(p.sig_alg, trust_sig_alg, "sig_alg mismatch must be detectable");
         assert_eq!(p.sig_alg, 4, "payload claims ECDSA P-256");
         assert_eq!(trust_sig_alg, 6, "trust config expects Ed25519");
+    }
+
+
+    // --- revocation-cascade-r1 ---
+    #[test]
+    fn test_cascade_vector_r1() {
+        use crate::cascade::Cascade;
+        let r1_hex = "01000000080112";
+        let revoked: &[u64] = &[2, 5];
+        let valid: &[u64]   = &[1, 3, 4, 6, 7, 8];
+
+        let c = Cascade::build(revoked, valid).unwrap();
+        assert_eq!(hex(&c.encode()), r1_hex, "R1 bytes changed — update spec");
+
+        let c2 = Cascade::decode(&from_hex(r1_hex)).unwrap();
+        let expect: &[(u64, bool)] = &[
+            (0, false), (1, false), (2, true),
+            (3, false), (4, false), (5, true),
+            (6, false), (7, false), (8, false), (99, false),
+        ];
+        for &(idx, want) in expect {
+            assert_eq!(c.query(idx), want, "query({idx}) mismatch");
+            assert_eq!(c2.query(idx), want, "decoded query({idx}) mismatch");
+        }
+    }
+
+    // --- revocation-cascade-r2 ---
+    #[test]
+    fn test_cascade_vector_r2() {
+        use crate::cascade::Cascade;
+        let c = Cascade::build(&[], &[1, 2, 3]).unwrap();
+        assert_eq!(hex(&c.encode()), "00", "R2 must be [0x00]");
+        assert!(!c.query(1));
+        assert!(!c.query(99));
     }
 }
