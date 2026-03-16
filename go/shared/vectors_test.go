@@ -7,6 +7,9 @@ import (
 	"os"
 	"testing"
 
+	"fmt"
+
+	"github.com/mta-qr/demo/shared/cascade"
 	mtacbor "github.com/mta-qr/demo/shared/cbor"
 	"github.com/mta-qr/demo/shared/checkpoint"
 	"github.com/mta-qr/demo/shared/merkle"
@@ -418,5 +421,75 @@ func TestRejectWrongSigAlg(t *testing.T) {
 	}
 	if input.TrustConfig.SigAlg != int(payload.SigAlgEd25519) {
 		t.Errorf("expected trust config sig_alg=%d (Ed25519), got %d", payload.SigAlgEd25519, input.TrustConfig.SigAlg)
+	}
+}
+
+func TestCascadeVectorR1(t *testing.T) {
+	vs := loadVectors(t)
+	v := vs["revocation-cascade-r1"]
+
+	var input struct {
+		RevokedIndices []uint64 `json:"revoked_indices"`
+		ValidIndices   []uint64 `json:"valid_indices"`
+	}
+	if err := json.Unmarshal(v.Input, &input); err != nil {
+		t.Fatalf("parse input: %v", err)
+	}
+
+	var expected struct {
+		CascadeHex string `json:"cascade_hex"`
+		Queries    []struct {
+			Index   uint64 `json:"index"`
+			Revoked bool   `json:"revoked"`
+		} `json:"queries"`
+	}
+	if err := json.Unmarshal(v.Expected, &expected); err != nil {
+		t.Fatalf("parse expected: %v", err)
+	}
+
+	c, err := cascade.Build(input.RevokedIndices, input.ValidIndices)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	gotHex := fmt.Sprintf("%x", c.Encode())
+	if gotHex != expected.CascadeHex {
+		t.Errorf("cascade_hex = %s, want %s", gotHex, expected.CascadeHex)
+	}
+	for _, q := range expected.Queries {
+		if got := c.Query(q.Index); got != q.Revoked {
+			t.Errorf("Query(%d) = %v, want %v", q.Index, got, q.Revoked)
+		}
+	}
+}
+
+func TestCascadeVectorR2(t *testing.T) {
+	vs := loadVectors(t)
+	v := vs["revocation-cascade-r2"]
+
+	var expected struct {
+		CascadeHex string `json:"cascade_hex"`
+		Queries    []struct {
+			Index   uint64 `json:"index"`
+			Revoked bool   `json:"revoked"`
+		} `json:"queries"`
+	}
+	if err := json.Unmarshal(v.Expected, &expected); err != nil {
+		t.Fatalf("parse expected: %v", err)
+	}
+
+	c, err := cascade.Build(nil, nil)
+	if err != nil {
+		t.Fatalf("Build empty: %v", err)
+	}
+
+	gotHex := fmt.Sprintf("%x", c.Encode())
+	if gotHex != expected.CascadeHex {
+		t.Errorf("R2 cascade_hex = %s, want %s", gotHex, expected.CascadeHex)
+	}
+	for _, q := range expected.Queries {
+		if got := c.Query(q.Index); got != q.Revoked {
+			t.Errorf("R2 Query(%d) = %v, want %v", q.Index, got, q.Revoked)
+		}
 	}
 }

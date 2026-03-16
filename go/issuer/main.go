@@ -66,6 +66,8 @@ func main() {
 	http.HandleFunc("/", handleUI)
 	http.HandleFunc("/issue", handleIssue)
 	http.HandleFunc("/checkpoint", handleCheckpoint)
+	http.HandleFunc("/revoked", handleRevoked)
+	http.HandleFunc("/revoke", handleRevoke)
 	http.HandleFunc("/trust-config", handleTrustConfig)
 	http.HandleFunc("/qr.png", handleQRPNG)
 
@@ -112,6 +114,57 @@ func handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTrustConfig serves the trust configuration JSON that verifiers need.
+// handleRevoked serves the current signed revocation artifact.
+// GET /revoked — returns the mta-qr-revocation-v1 signed note.
+func handleRevoked(w http.ResponseWriter, r *http.Request) {
+	setCORS(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	art := issuerLog.LatestRevocationArtifact()
+	if art == nil {
+		http.Error(w, "no revocation artifact available", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write(art)
+}
+
+// handleRevoke accepts a POST /revoke request to revoke an entry by index.
+// This is a demo endpoint — production deployments should protect this with
+// appropriate authorization controls.
+// Body: JSON {"entry_index": N}
+func handleRevoke(w http.ResponseWriter, r *http.Request) {
+	setCORS(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1024)
+	var req struct {
+		EntryIndex uint64 `json:"entry_index"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := issuerLog.Revoke(req.EntryIndex); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"revoked":true}`))
+}
+
 func handleTrustConfig(w http.ResponseWriter, r *http.Request) {
 	setCORS(w)
 	tc := issuerLog.TrustConfig()

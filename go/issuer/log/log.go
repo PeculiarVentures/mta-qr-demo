@@ -15,12 +15,15 @@ package log
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	cborlib "github.com/fxamacker/cbor/v2"
 	mtacbor "github.com/mta-qr/demo/shared/cbor"
+	"github.com/mta-qr/demo/shared/cascade"
 	"github.com/mta-qr/demo/shared/checkpoint"
 	"github.com/mta-qr/demo/shared/merkle"
 	"github.com/mta-qr/demo/shared/payload"
@@ -63,14 +66,16 @@ type WitnessKey struct {
 
 // Log is the in-memory tiled issuance log.
 type Log struct {
-	mu           sync.RWMutex
-	origin       string
-	originID     uint64
-	issuer       signing.Signer
-	witnesses    []WitnessKey
-	batches      []Batch  // completed batches
-	currentBatch []Entry  // in-progress batch (< BatchSize entries)
-	latestCkpt   *SignedCheckpoint
+	mu               sync.RWMutex
+	origin           string
+	originID         uint64
+	issuer           signing.Signer
+	witnesses        []WitnessKey
+	batches          []Batch  // completed batches
+	currentBatch     []Entry  // in-progress batch (< BatchSize entries)
+	latestCkpt       *SignedCheckpoint
+	revokedIndices   map[uint64]bool  // entry indices explicitly revoked
+	latestRevocation []byte           // signed revocation artifact bytes
 }
 
 // SignedCheckpoint is a checkpoint with witness cosignatures attached.
@@ -100,10 +105,11 @@ func New(origin string, issuer signing.Signer) (*Log, error) {
 	}
 
 	l := &Log{
-		origin:   origin,
-		originID: checkpoint.OriginID(origin),
-		issuer:   issuer,
-		witnesses: witnesses,
+		origin:         origin,
+		originID:       checkpoint.OriginID(origin),
+		issuer:         issuer,
+		witnesses:      witnesses,
+		revokedIndices: make(map[uint64]bool),
 	}
 
 	if err := l.appendNullEntry(); err != nil {
@@ -278,6 +284,11 @@ func (l *Log) publishCheckpointLocked() error {
 	l.latestCkpt = &SignedCheckpoint{
 		TreeSize: treeSize, RootHash: parentRoot, Body: body, IssuerSig: isig, Cosigs: cosigs,
 	}
+
+	// Build revocation artifact alongside every checkpoint.
+	if art, err := l.buildRevocationArtifactLocked(); err == nil {
+		l.latestRevocation = art
+	}
 	return nil
 }
 
@@ -375,6 +386,7 @@ func (l *Log) TrustConfig() TrustConfig {
 	baseURL := envOr("MTA_BASE_URL", fmt.Sprintf("http://localhost:%s", issuerPort()))
 	checkpointURL := strings.TrimRight(baseURL, "/") + "/checkpoint"
 
+	revocationURL := strings.TrimRight(baseURL, "/") + "/revoked"
 	return TrustConfig{
 		Origin:        l.origin,
 		OriginID:      fmt.Sprintf("%016x", l.originID),
@@ -384,6 +396,7 @@ func (l *Log) TrustConfig() TrustConfig {
 		WitnessQuorum: len(l.witnesses),
 		Witnesses:     witnesses,
 		CheckpointURL: checkpointURL,
+		RevocationURL: revocationURL,
 		BatchSize:     BatchSize,
 	}
 }
@@ -411,15 +424,16 @@ func issuerPort() string {
 
 // TrustConfig is the serialized trust anchor for a verifier.
 type TrustConfig struct {
-	Origin        string          `json:"origin"`
-	OriginID      string          `json:"origin_id"`
-	IssuerPubKey  string          `json:"issuer_pub_key_hex"`
-	IssuerKeyName string          `json:"issuer_key_name"`
-	SigAlg        uint8           `json:"sig_alg"`
-	WitnessQuorum int             `json:"witness_quorum"`
-	Witnesses     []WitnessConfig `json:"witnesses"`
-	CheckpointURL string          `json:"checkpoint_url"`
-	BatchSize     int             `json:"batch_size"`
+	Origin         string          `json:"origin"`
+	OriginID       string          `json:"origin_id"`
+	IssuerPubKey   string          `json:"issuer_pub_key_hex"`
+	IssuerKeyName  string          `json:"issuer_key_name"`
+	SigAlg         uint8           `json:"sig_alg"`
+	WitnessQuorum  int             `json:"witness_quorum"`
+	Witnesses      []WitnessConfig `json:"witnesses"`
+	CheckpointURL  string          `json:"checkpoint_url"`
+	RevocationURL  string          `json:"revocation_url"`
+	BatchSize      int             `json:"batch_size"`
 }
 
 // WitnessConfig is a single witness entry.
@@ -427,4 +441,112 @@ type WitnessConfig struct {
 	Name   string `json:"name"`
 	KeyID  string `json:"key_id_hex"`
 	PubKey string `json:"pub_key_hex"`
+}
+
+// Revoke marks an entry index as revoked and republishes the revocation artifact.
+// Returns an error if the entry index has not been issued (> current tree_size).
+func (l *Log) Revoke(entryIndex uint64) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if entryIndex == 0 {
+		return fmt.Errorf("revoke: entry_index=0 is the null entry and cannot be revoked")
+	}
+	if entryIndex >= l.totalEntries() {
+		return fmt.Errorf("revoke: entry_index %d not yet issued (tree_size=%d)", entryIndex, l.totalEntries())
+	}
+	l.revokedIndices[entryIndex] = true
+	art, err := l.buildRevocationArtifactLocked()
+	if err != nil {
+		return fmt.Errorf("revoke: build artifact: %w", err)
+	}
+	l.latestRevocation = art
+	return nil
+}
+
+// LatestRevocationArtifact returns the current signed revocation artifact bytes,
+// or nil if no checkpoint has been published yet.
+func (l *Log) LatestRevocationArtifact() []byte {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.latestRevocation
+}
+
+// buildRevocationArtifactLocked builds and signs the revocation artifact.
+// Must be called with l.mu held (write or at publish time).
+func (l *Log) buildRevocationArtifactLocked() ([]byte, error) {
+	treeSize := l.totalEntries()
+
+	// Build R (revoked) and S (valid non-revoked, non-expired).
+	// Index 0 (null entry) is always excluded from both sets.
+	now := uint64(time.Now().Unix())
+	var revoked, valid []uint64
+	for _, batch := range l.batches {
+		for _, e := range batch.Entries {
+			if e.Index == 0 {
+				continue
+			}
+			if l.revokedIndices[e.Index] {
+				revoked = append(revoked, e.Index)
+				continue
+			}
+			// Exclude expired entries (expiry_time < now).
+			// TBS[0] is entry_type_byte; for data assertions, expiry is in CBOR field 2.
+			if expiry := entryExpiry(e.TBS); expiry > 0 && expiry < now {
+				continue
+			}
+			valid = append(valid, e.Index)
+		}
+	}
+	for _, e := range l.currentBatch {
+		if e.Index == 0 {
+			continue
+		}
+		if l.revokedIndices[e.Index] {
+			revoked = append(revoked, e.Index)
+			continue
+		}
+		if expiry := entryExpiry(e.TBS); expiry > 0 && expiry < now {
+			continue
+		}
+		valid = append(valid, e.Index)
+	}
+
+	casc, err := cascade.Build(revoked, valid)
+	if err != nil {
+		return nil, fmt.Errorf("cascade build: %w", err)
+	}
+	cascBytes := casc.Encode()
+
+	// Build the four-line body per SPEC.md §Revocation — Wire Format.
+	body := fmt.Sprintf("%s\n%d\nmta-qr-revocation-v1\n%s\n",
+		l.origin, treeSize, base64.StdEncoding.EncodeToString(cascBytes))
+
+	// Sign with the issuer key (same key as checkpoints).
+	sig, err := l.issuer.Sign([]byte(body))
+	if err != nil {
+		return nil, fmt.Errorf("sign revocation: %w", err)
+	}
+	keyID := l.NoteKeyID()
+	sigLine := fmt.Sprintf("\n— %s %s\n",
+		l.NoteKeyName(),
+		base64.StdEncoding.EncodeToString(append(keyID[:], sig...)))
+
+	return []byte(body + sigLine), nil
+}
+
+// entryExpiry extracts expiry_time from a data assertion TBS, or 0 if not applicable.
+func entryExpiry(tbs []byte) uint64 {
+	if len(tbs) < 2 || tbs[0] != 0x01 { // 0x01 = data assertion entry type
+		return 0
+	}
+	// Minimal CBOR decode: map key 2 → [issuance_time, expiry_time].
+	// Use the fxamacker/cbor decoder for correctness.
+	var entry struct {
+		Times [2]uint64 `cbor:"2,keyasint"`
+	}
+	dm, _ := cborlib.DecOptions{}.DecMode()
+	if err := dm.Unmarshal(tbs[1:], &entry); err != nil {
+		return 0
+	}
+	return entry.Times[1]
 }

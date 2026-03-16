@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.peculiarventures.mtaqr.issuer.Issuer;
 import com.peculiarventures.mtaqr.signers.LocalSigner;
+import com.peculiarventures.mtaqr.cascade.Cascade;
 import com.peculiarventures.mtaqr.signing.SignatureVerifier;
 import com.peculiarventures.mtaqr.verifier.Verifier;
 import org.junit.jupiter.api.BeforeAll;
@@ -249,4 +250,48 @@ class VectorTest {
         assertEquals(4, p.sigAlg(), "payload claims ECDSA P-256 (4)");
         assertEquals(6, trustSigAlg, "trust config expects Ed25519 (6)");
     }
+    // --- revocation-cascade-r1 ---
+
+    @Test
+    void testCascadeVectorR1() throws Exception {
+        JsonNode v = vectors.get("revocation-cascade-r1");
+        JsonNode inp = v.get("input");
+        JsonNode exp = v.get("expected");
+
+        long[] revoked = toArray(inp.get("revoked_indices"));
+        long[] valid   = toArray(inp.get("valid_indices"));
+
+        Cascade c = Cascade.build(revoked, valid);
+        assertEquals(exp.get("cascade_hex").asText(), hex(c.encode()), "R1 cascade_hex");
+
+        Cascade c2 = Cascade.decode(fromHex(exp.get("cascade_hex").asText()));
+        for (JsonNode q : exp.get("queries")) {
+            long idx = q.get("index").asLong();
+            boolean want = q.get("revoked").asBoolean();
+            assertEquals(want, c.query(idx),  "build.query(" + idx + ")");
+            assertEquals(want, c2.query(idx), "decode.query(" + idx + ")");
+        }
+    }
+
+    // --- revocation-cascade-r2 ---
+
+    @Test
+    void testCascadeVectorR2() throws Exception {
+        JsonNode v = vectors.get("revocation-cascade-r2");
+        JsonNode exp = v.get("expected");
+
+        Cascade c = Cascade.build(new long[0], new long[0]);
+        assertEquals(exp.get("cascade_hex").asText(), hex(c.encode()), "R2 cascade_hex");
+
+        for (JsonNode q : exp.get("queries")) {
+            assertFalse(c.query(q.get("index").asLong()), "R2 must never revoke");
+        }
+    }
+
+    private static long[] toArray(JsonNode arr) {
+        long[] a = new long[arr.size()];
+        for (int i = 0; i < arr.size(); i++) a[i] = arr.get(i).asLong();
+        return a;
+    }
+
 }

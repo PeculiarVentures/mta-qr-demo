@@ -26,6 +26,7 @@ import {
 import { verifySig } from "./verify-sig.js";
 import { SIG_ALG_ED25519 } from "./signer.js";
 import { Claims } from "./cbor.js";
+import { Cascade } from "./cascade.js";
 
 // --- Result types ---
 
@@ -84,6 +85,7 @@ export class Verifier {
   // from payloads with rapidly incrementing tree_size values.
   private static readonly MAX_CACHE_ENTRIES = 1000;
   private readonly cache = new Map<string, CachedCheckpoint>();
+  private readonly revocCache = new Map<string, { cascade: Cascade; treeSize: bigint }>();
 
   /**
    * @param trust       Trust configuration from the issuer.
@@ -236,13 +238,10 @@ export class Verifier {
     catch (e) { return fail("cbor decode", `${e}`); }
     add("cbor decode", true, `schema_id=${entry.schemaId} issued=${entry.times[0]} expires=${entry.times[1]}`);
 
-    // 10. Revocation check.
-    // The revocation protocol is fully specified in SPEC.md §Revocation:
-    // a Bloom filter cascade over revoked/valid entry indices, signed with
-    // the issuer key, served at GET /revoked (this.trust.revocationUrl).
-    // TODO: implement cascade fetch, cache, staleness check, and query.
-    // Fail-open is NOT the correct default. See issue #14.
-    add("revocation", false, "not implemented — stub only, revocation not checked");
+    // 10. Revocation check — SPEC.md §Revocation.
+    const revocResult = await this.checkRevocation(p.entryIndex, p.treeSize, this.trust);
+    if (revocResult.revoked) return fail("revocation", revocResult.reason);
+    add("revocation", true, revocResult.reason);
 
     // 11. Expiry (10-minute grace period).
     const now   = Math.floor(Date.now() / 1000);
@@ -342,6 +341,83 @@ export class Verifier {
     }
 
     return [rootHash, treeSize];
+  }
+
+  /** Revocation check — SPEC.md §Revocation — Verifier Behavior. */
+  private async checkRevocation(
+    entryIndex: bigint, checkpointTreeSize: bigint, trust: TrustConfig
+  ): Promise<{ revoked: boolean; reason: string }> {
+    const STALE = 32n; // 2 × BATCH_SIZE
+    if (!trust.revocationUrl)
+      return { revoked: false, reason: "skipped — no revocation_url (fail-open)" };
+
+    let cached = this.revocCache.get(trust.origin) ?? null;
+    if (cached && checkpointTreeSize > cached.treeSize &&
+        checkpointTreeSize - cached.treeSize > STALE) cached = null;
+
+    if (!cached) {
+      let raw: string;
+      try {
+        if (typeof fetch === "function") {
+          const r = await fetch(trust.revocationUrl);
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          raw = await r.text();
+        } else {
+          const http = await import("http");
+          raw = await new Promise((res, rej) =>
+            http.get(trust.revocationUrl, r => {
+              const c: Buffer[] = [];
+              r.on("data", (d: Buffer) => c.push(d));
+              r.on("end", () => res(Buffer.concat(c).toString("utf8")));
+              r.on("error", rej);
+            }).on("error", rej));
+        }
+      } catch (e) {
+        return { revoked: true, reason: `no artifact (fail-closed): ${e}` };
+      }
+      const p = this.parseRevArtifact(raw, trust);
+      if ("error" in p) return { revoked: true, reason: `bad artifact (fail-closed): ${p.error}` };
+      this.revocCache.set(trust.origin, p);
+      cached = p;
+    }
+
+    if (cached.treeSize <= entryIndex)
+      return { revoked: true, reason: `entry ${entryIndex} not covered by artifact (tree_size=${cached.treeSize}) — fail-closed` };
+    if (cached.cascade.query(entryIndex))
+      return { revoked: true, reason: `entry_index=${entryIndex} is revoked` };
+    return { revoked: false, reason: `not revoked (cascade, artifact tree_size=${cached.treeSize})` };
+  }
+
+  private parseRevArtifact(
+    text: string, trust: TrustConfig
+  ): { cascade: Cascade; treeSize: bigint } | { error: string } {
+    const parts = text.split("\n\n");
+    if (parts.length < 2) return { error: "missing blank line" };
+    const bodyLines = parts[0].split("\n");
+    if (bodyLines.length !== 4) return { error: `expected 4 body lines, got ${bodyLines.length}` };
+    const [origin, treeSizeStr, artifactType, cascB64] = bodyLines;
+    if (origin !== trust.origin) return { error: `origin mismatch: ${origin}` };
+    if (artifactType !== "mta-qr-revocation-v1") return { error: `unknown type: ${artifactType}` };
+    const treeSize = BigInt(treeSizeStr);
+    if (treeSize === 0n) return { error: "tree_size=0" };
+    let cascBytes: Uint8Array;
+    try { cascBytes = Uint8Array.from(Buffer.from(cascB64, "base64")); }
+    catch { return { error: "base64 failed" }; }
+    let cascade: Cascade;
+    try { cascade = Cascade.decode(cascBytes); }
+    catch (e) { return { error: `cascade decode: ${e}` }; }
+    // Verify signature — algorithm binding per SPEC.md.
+    const body = parts[0] + "\n";
+    const sigBlock = parts.slice(1).join("\n\n").trim();
+    const prefix = `\u2014 ${trust.issuerKeyName} `;
+    const sigLine = sigBlock.split("\n").find(l => l.startsWith(prefix));
+    if (!sigLine) return { error: "issuer sig line not found" };
+    const sigRaw = Buffer.from(sigLine.slice(prefix.length), "base64");
+    if (sigRaw.length < 4) return { error: "sig line too short" };
+    const pub = trust.issuerPubKey;
+    if (!verifySig(trust.sigAlg, new TextEncoder().encode(body), sigRaw.subarray(4), pub))
+      return { error: "signature verification failed" };
+    return { cascade, treeSize };
   }
 }
 
