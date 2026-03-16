@@ -1453,48 +1453,71 @@ at subsequent levels rather than by multiple hash functions within a single leve
 ```
 m = max(ceil(n * BITS_PER_ELEMENT), MIN_FILTER_BITS)
 
-BITS_PER_ELEMENT = 1.44   (≈ ln(2)^-2, optimal for 50% FPR)
-MIN_FILTER_BITS  = 64
+BITS_PER_ELEMENT = 1.4427   (= 1/ln(2), optimal bits per element for k=1 at 50% FPR)
+MIN_FILTER_BITS  = 8        (1 byte minimum; preserves ~50% FPR for n=1)
+MAX_LEVELS       = 32       (construction MUST fail if not terminated by this depth)
 ```
 
 Round `m` up to the nearest multiple of 8 so the bit array is byte-aligned.
-`ceil(n * 1.44)` with a minimum of 64 bits.
+`ceil(n * 1.4427)` with a minimum of 8 bits (1 byte).
+
+**Why MIN_FILTER_BITS = 8, not 64.** The cascade relies on each level having
+approximately 50% FPR to make the false-positive set shrink probabilistically
+at each level. With `BITS_PER_ELEMENT = 1/ln(2)`, a single-element filter
+(`n=1`) needs `ceil(1 * 1.4427) = 2` bits, which rounds to 8 bits (1 byte),
+giving FPR ≈ 50%. A 64-bit minimum for `n=1` would give FPR ≈ 1.6% — far
+below 50% — so a false positive at that level would persist into the next
+level unchanged, and the cascade may not terminate. The 8-bit minimum
+preserves the ~50% FPR invariant that the algorithm requires.
+
+**Why MAX_LEVELS = 32.** Even with correct parameters, implementations MUST
+enforce a depth bound. If construction reaches 32 levels without terminating,
+something is wrong with the inputs or hash function and the issuer MUST fail
+rather than loop. In practice, a level-0 filter with ~50% FPR over `|S|`
+elements produces `~|S|/2` false positives; the cascade terminates in
+`log2(|S|)` expected levels. For `|S| = 2^32` that is 32 levels — a safe
+absolute bound.
 
 **Cascade construction algorithm:**
 
 ```
 function BuildCascade(R, S):
   levels = []
-  current_fp_set = S  // start: false positives at Level 0 are entries in S
-  include_set = R     // Level 0 encodes R
-  level_index = 0
+  include = R  // Level 0 encodes R (the revoked set)
+  exclude = S  // Level 0 checks S (the valid set) for false positives
 
-  while include_set is not empty:
-    m = max(ceil(len(include_set) * 1.44), 64)
+  for level_index in 0..MAX_LEVELS:
+    if include is empty:
+      break
+    m = max(ceil(len(include) * 1.4427), 8)
     m = ceil(m / 8) * 8  // round up to byte boundary
     bits = zero_array(m)
 
-    for x in sorted(include_set, ascending):
+    for x in sorted(include, ascending):
       bit = bit_position(x, level_index) mod m
       bits[bit] = 1
 
     levels.append({bit_count: m, bits: bits})
 
-    // Compute false positives: elements in current_fp_set that hash into bits
-    new_fp_set = {}
-    for x in current_fp_set:
+    // Find false positives: elements of exclude that collide in this filter.
+    // These elements will return the wrong answer at this level and must be
+    // corrected at the next level.
+    false_positives = {}
+    for x in exclude:
       bit = bit_position(x, level_index) mod m
       if bits[bit] == 1:
-        new_fp_set.add(x)
+        false_positives.add(x)
 
-    // Next level: encode the false positives to eliminate them.
-    // Invariant: include_set is the set this level encodes.
-    // current_fp_set is the set whose false positives define the next level.
-    // Both are new_fp_set because Level N+1 encodes exactly the false
-    // positives of Level N — elements of S that made it through Level N.
-    include_set = new_fp_set
-    current_fp_set = new_fp_set
+    // KEY: swap domains for the next level.
+    // The next level encodes the false positives (to flip their answer back),
+    // and checks the previous include set for new false positives.
+    // This alternation is why even levels return REVOKED and odd levels
+    // return NOT_REVOKED when an element first matches.
+    include, exclude = false_positives, include
     level_index += 1
+
+  if include is not empty:
+    fail("cascade did not terminate — implementation or input error")
 
   return levels
 ```
@@ -1714,10 +1737,10 @@ asymmetric signature verification overhead.
 
 These are computed from the normative construction parameters above.
 
-For `n` revoked entries at `BITS_PER_ELEMENT = 1.44`, the Level 0 filter is
-approximately `1.44 × n` bits. Subsequent levels are much smaller (encoding
-only the false positive set, which shrinks rapidly). Total cascade size is
-approximately `1.44 × n / 8` bytes plus a small constant per level.
+For `n` revoked entries at `BITS_PER_ELEMENT = 1/ln(2) ≈ 1.4427`, the Level 0
+filter is approximately `1.4427 × n` bits. Subsequent levels are much smaller
+(encoding only the false positive set, which shrinks rapidly). Total cascade
+size is approximately `1.4427 × n / 8` bytes plus a small constant per level.
 
 | Revoked entries | Approximate full cascade |
 |----------------|--------------------------|
@@ -1927,10 +1950,18 @@ Expected queries:
   Query(cascade, 99) → NOT_REVOKED  (not in either set; still not revoked)
 ```
 
-The exact `cascade_bytes` hex for this input MUST be generated by the Go
-reference implementation once implemented, then locked as the normative value.
-All other implementations verify against that hex. This vector will be added
-to `test-vectors/vectors.json` at that time.
+Normative `cascade_bytes` hex (7 bytes):
+
+```
+01 00000008 01 12
+```
+
+Decoded: `num_levels=1`; Level 0: `bit_count=8`, `k=1`, `bits=0x12`.
+Bit array `0x12 = 0b00010010`: bit 3 set (entry 2), bit 6 set (entry 5).
+No S false positives at Level 0; cascade terminates in 1 level.
+
+This vector MUST be added to `test-vectors/vectors.json` once
+`go/shared/cascade/cascade.go` is implemented and verified against it.
 
 **Vector R2: empty revocation set**
 
@@ -1945,6 +1976,32 @@ Expected:
   Query(cascade, 2) → NOT_REVOKED
   Query(cascade, 99) → NOT_REVOKED
 ```
+
+**Vector R3: cascade construction — multi-level (two levels)**
+
+```
+Input:
+  R (revoked):  [11, 20, 39, 59, 103, 133, 151, 163]
+                (random.seed(46), sampled from range(1, 200))
+  S (valid):    30 elements from range(1, 200) excluding R
+                (same seed; exact values determine cascade_bytes)
+  tree_size:    200
+
+Expected queries:
+  All R members  → REVOKED
+  All S members  → NOT_REVOKED
+```
+
+Normative `cascade_bytes` hex (15 bytes):
+
+```
+02 00000010 01 140f 00000010 01 4e64
+```
+
+Decoded: `num_levels=2`; Level 0: `bit_count=16`, `k=1`, `bits=0x140f`;
+Level 1: `bit_count=16`, `k=1`, `bits=0x4e64`.
+Level 1 encodes S false positives from Level 0, correcting them to NOT_REVOKED.
+This vector exercises the multi-level path and the domain-swap construction.
 
 **Verifier rejection cases — MUST all result in artifact discard:**
 
