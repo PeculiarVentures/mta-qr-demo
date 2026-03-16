@@ -1,6 +1,7 @@
 package com.peculiarventures.mtaqr.issuer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.peculiarventures.mtaqr.cascade.Cascade;
 import com.peculiarventures.mtaqr.signing.Signer;
 import com.peculiarventures.mtaqr.trust.TrustConfig;
 
@@ -107,6 +108,8 @@ public final class Issuer {
     private List<Batch>      batches      = new ArrayList<>();
     private List<LogEntry>   currentBatch = new ArrayList<>();
     private SignedCheckpoint latestCkpt;
+    private final Set<Long>  revokedIndices = new HashSet<>();
+    private volatile String  latestRevArtifact;
 
     private Issuer(String origin, long schemaId, int mode, int batchSize, int witnessCount, Signer signer) {
         this.origin       = origin;
@@ -191,6 +194,7 @@ public final class Issuer {
                     Map.entry("sig_alg",            signer.getAlg()),
                     Map.entry("witness_quorum",     witnesses.size()),
                     Map.entry("checkpoint_url",     checkpointUrl),
+                    Map.entry("revocation_url",    revocationUrlFrom(checkpointUrl)),
                     Map.entry("batch_size",         batchSize),
                     Map.entry("witnesses",          wList)
                 ));
@@ -278,6 +282,7 @@ public final class Issuer {
             }
             synchronized (lock) {
                 latestCkpt = new SignedCheckpoint(treeSize, parentRoot, body, issuerSig, cosigs);
+                latestRevArtifact = buildRevocationArtifact(treeSize);
             }
         });
     }
@@ -328,6 +333,69 @@ public final class Issuer {
         // Temporarily swap schemaId since encodeTbs uses the instance field
         // We need a standalone version — delegate to the internal CBOR logic.
         return encodeTbsStatic(issuedAt, expiresAt, schemaId, claims);
+    }
+
+    public void revoke(long entryIndex) {
+        synchronized (lock) {
+            if (entryIndex == 0)
+                throw new IllegalArgumentException("entry_index=0 is the null entry");
+            if (entryIndex >= totalEntriesLocked())
+                throw new IllegalArgumentException("entry_index " + entryIndex + " not yet issued");
+            revokedIndices.add(entryIndex);
+            if (latestCkpt != null)
+                latestRevArtifact = buildRevocationArtifact(latestCkpt.treeSize());
+        }
+    }
+
+    public String revocationArtifact() { return latestRevArtifact; }
+
+    private static String revocationUrlFrom(String checkpointUrl) {
+        return checkpointUrl.endsWith("/checkpoint")
+            ? checkpointUrl.substring(0, checkpointUrl.length() - 11) + "/revoked"
+            : checkpointUrl.replace("checkpoint", "revoked");
+    }
+
+    private String buildRevocationArtifact(long treeSize) {
+        long now = Instant.now().getEpochSecond();
+        List<Long> revoked = new ArrayList<>(), valid = new ArrayList<>();
+        List<LogEntry> all = new ArrayList<>();
+        synchronized (lock) {
+            for (Batch b : batches) all.addAll(b.entries());
+            all.addAll(currentBatch);
+        }
+        for (LogEntry e : all) {
+            if (e.index() == 0) continue;
+            if (revokedIndices.contains(e.index())) { revoked.add(e.index()); continue; }
+            long exp = entryExpiryTimestamp(e.tbs());
+            if (exp > 0 && exp < now) continue;
+            valid.add(e.index());
+        }
+        long[] r = revoked.stream().mapToLong(Long::longValue).toArray();
+        long[] v = valid.stream().mapToLong(Long::longValue).toArray();
+        Cascade casc = Cascade.build(r, v);
+        String cascB64 = Base64.getEncoder().encodeToString(casc.encode());
+        String body = origin + "\n" + treeSize + "\nmta-qr-revocation-v1\n" + cascB64 + "\n";
+        byte[] bodyBytes = body.getBytes(StandardCharsets.UTF_8);
+        byte[] sig;
+        try { sig = signer.sign(bodyBytes).get(); }
+        catch (Exception e) { throw new RuntimeException("revocation sign failed", e); }
+        byte[] keyId = witnessKeyId(signer.getKeyName(), issuerPub);
+        byte[] payload = new byte[4 + sig.length];
+        System.arraycopy(keyId, 0, payload, 0, 4);
+        System.arraycopy(sig,   0, payload, 4, sig.length);
+        String sigLine = "\n\u2014 " + signer.getKeyName() + " " +
+            Base64.getEncoder().encodeToString(payload) + "\n";
+        return body + sigLine;
+    }
+
+    private static long entryExpiryTimestamp(byte[] tbs) {
+        if (tbs == null || tbs.length < 2 || tbs[0] != ENTRY_TYPE_DATA) return 0;
+        try {
+            var obj = com.upokecenter.cbor.CBORObject.DecodeFromBytes(
+                java.util.Arrays.copyOfRange(tbs, 1, tbs.length));
+            var times = obj.get(com.upokecenter.cbor.CBORObject.FromObject(2));
+            return (times != null && times.size() >= 2) ? times.get(1).AsInt64Value() : 0;
+        } catch (Exception e) { return 0; }
     }
 
     private static byte[] entryHash(byte[] tbs) {

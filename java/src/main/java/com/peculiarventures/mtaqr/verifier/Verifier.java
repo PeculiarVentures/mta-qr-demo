@@ -3,6 +3,7 @@ package com.peculiarventures.mtaqr.verifier;
 import com.peculiarventures.mtaqr.issuer.Issuer;
 import com.peculiarventures.mtaqr.signing.Signer;
 import com.peculiarventures.mtaqr.signing.SignatureVerifier;
+import com.peculiarventures.mtaqr.cascade.Cascade;
 import com.peculiarventures.mtaqr.trust.TrustConfig;
 
 import java.net.URI;
@@ -94,24 +95,27 @@ public final class Verifier {
     public static Builder builder() { return new Builder(); }
 
     public static final class Builder {
-        private TrustConfig   trust;
-        private HttpClient    httpClient;
-        private NoteProvider  noteProvider;
+        private TrustConfig         trust;
+        private HttpClient          httpClient;
+        private NoteProvider        noteProvider;
+        private RevocationProvider  revocationProvider;
 
         public Builder trust(TrustConfig v)       { trust = v; return this; }
         public Builder httpClient(HttpClient v)    { httpClient = v; return this; }
         /** Inject a note provider for testing — bypasses HTTP. */
         public Builder noteProvider(NoteProvider v){ noteProvider = v; return this; }
+        /** Inject a revocation provider for testing — bypasses HTTP. */
+        public Builder revocationProvider(RevocationProvider v){ revocationProvider = v; return this; }
 
         public Verifier build() {
             Objects.requireNonNull(trust, "trust is required");
             return new Verifier(trust,
                 httpClient != null ? httpClient :
-                    // 10-second connect timeout prevents indefinite hangs on slow issuers.
                     HttpClient.newBuilder()
                         .connectTimeout(Duration.ofSeconds(10))
                         .build(),
-                noteProvider);
+                noteProvider,
+                revocationProvider);
         }
     }
 
@@ -121,14 +125,21 @@ public final class Verifier {
         CompletableFuture<String> fetchNote(String url);
     }
 
+    /** Provides revocation artifacts without HTTP. Used in tests. */
+    @FunctionalInterface
+    public interface RevocationProvider {
+        CompletableFuture<String> fetchArtifact(String url);
+    }
+
     // --- internals ---
 
     private static final int GRACE      = 600; // seconds
 
-    private final TrustConfig  trust;
-    private final int batchSize; // read from trust.batchSize at construction
-    private final HttpClient   httpClient;
-    private final NoteProvider noteProvider;
+    private final TrustConfig          trust;
+    private final int                  batchSize;
+    private final HttpClient           httpClient;
+    private final NoteProvider         noteProvider;
+    private final RevocationProvider   revocationProvider;
     private static final int MAX_CACHE_ENTRIES = 1000;
     // Bounded insertion-order cache — evicts oldest entry when full.
     // Prevents memory exhaustion from payloads with rapidly incrementing tree_size.
@@ -140,11 +151,16 @@ public final class Verifier {
         }
     );
 
-    private Verifier(TrustConfig trust, HttpClient httpClient, NoteProvider noteProvider) {
-        this.trust        = trust;
-        this.batchSize    = trust.batchSize > 0 ? trust.batchSize : 16;
-        this.httpClient   = httpClient;
-        this.noteProvider = noteProvider;
+    private record CachedRevocation(Cascade cascade, long treeSize) {}
+    private final Map<String, CachedRevocation> revocCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private Verifier(TrustConfig trust, HttpClient httpClient,
+                     NoteProvider noteProvider, RevocationProvider revocationProvider) {
+        this.trust               = trust;
+        this.batchSize           = trust.batchSize > 0 ? trust.batchSize : 16;
+        this.httpClient          = httpClient;
+        this.noteProvider        = noteProvider;
+        this.revocationProvider  = revocationProvider;
     }
 
     /**
@@ -312,13 +328,14 @@ public final class Verifier {
         steps.add(new Step("cbor decode", true,
             "schema_id=" + schemaId + " issued=" + issuedAt + " expires=" + expiresAt));
 
-        // Revocation check — not yet implemented.
-        // The revocation protocol is fully specified in SPEC.md §Revocation:
-        // a Bloom filter cascade over revoked/valid entry indices, signed with
-        // the issuer key, served at GET /revoked (trust.revocationUrl).
-        // TODO: implement cascade fetch, cache, staleness check, and query.
-        // Fail-open is NOT the correct default. See issue #14.
-        steps.add(new Step("revocation check", false, "not implemented — stub only, revocation not checked"));
+        // 10. Revocation check — SPEC.md §Revocation.
+        try {
+            String revocMsg = checkRevocation(p.entryIndex, p.treeSize).get();
+            steps.add(new Step("revocation check", true, revocMsg));
+        } catch (Exception e) {
+            String reason = e.getCause() != null ? e.getCause().getMessage() : e.getMessage();
+            return fail(steps, "revocation check", reason);
+        }
 
         // Expiry
         long now = Instant.now().getEpochSecond();
@@ -336,6 +353,98 @@ public final class Verifier {
     }
 
     // --- checkpoint fetch and note verification ---
+
+    // --- Revocation ---
+
+    private static final long STALE_THRESHOLD = 32L;
+
+    private CompletableFuture<String> checkRevocation(long entryIndex, long checkpointTreeSize) {
+        if (trust.revocationUrl == null || trust.revocationUrl.isEmpty())
+            return CompletableFuture.completedFuture(
+                "skipped — no revocation_url in trust config (fail-open)");
+
+        CachedRevocation cached = revocCache.get(trust.origin);
+        if (cached != null && checkpointTreeSize > cached.treeSize() &&
+                checkpointTreeSize - cached.treeSize() > STALE_THRESHOLD)
+            cached = null;
+
+        final CachedRevocation fresh = cached;
+        if (fresh == null) {
+            return fetchRevocationArtifact().thenApply(art -> {
+                revocCache.put(trust.origin, art);
+                return queryRevocation(art, entryIndex);
+            });
+        }
+        return CompletableFuture.completedFuture(queryRevocation(fresh, entryIndex));
+    }
+
+    private String queryRevocation(CachedRevocation art, long entryIndex) {
+        if (art.treeSize() <= entryIndex)
+            throw new IllegalStateException("entry_index=" + entryIndex +
+                " not covered by artifact (tree_size=" + art.treeSize() + ") — fail-closed");
+        if (art.cascade().query(entryIndex))
+            throw new IllegalStateException("entry_index=" + entryIndex + " is revoked");
+        return "entry_index=" + entryIndex + " not revoked (cascade checked, artifact tree_size=" +
+            art.treeSize() + ")";
+    }
+
+    private CompletableFuture<CachedRevocation> fetchRevocationArtifact() {
+        String url = trust.revocationUrl;
+        if (revocationProvider != null)
+            return revocationProvider.fetchArtifact(url)
+                .thenApply(this::parseRevocationArtifact);
+        HttpRequest req = HttpRequest.newBuilder()
+            .uri(URI.create(url))
+            .timeout(Duration.ofSeconds(10))
+            .GET().build();
+        return httpClient.sendAsync(req, HttpResponse.BodyHandlers.ofString())
+            .thenApply(resp -> {
+                if (resp.statusCode() != 200)
+                    throw new IllegalStateException("GET " + url + " → " + resp.statusCode());
+                if (resp.body().length() > 64 * 1024)
+                    throw new IllegalStateException("revocation artifact too large");
+                return parseRevocationArtifact(resp.body());
+            });
+    }
+
+    private CachedRevocation parseRevocationArtifact(String text) {
+        int sep = text.indexOf("\n\n");
+        if (sep < 0) throw new IllegalArgumentException("revocation artifact: missing blank line");
+        String bodyPart = text.substring(0, sep);
+        String sigPart  = text.substring(sep + 2);
+        String body     = bodyPart + "\n";
+
+        String[] lines = bodyPart.split("\n", -1);
+        if (lines.length != 4)
+            throw new IllegalArgumentException("revocation artifact: expected 4 body lines, got " + lines.length);
+        if (!lines[0].equals(trust.origin))
+            throw new IllegalArgumentException("revocation artifact: origin mismatch");
+        if (!"mta-qr-revocation-v1".equals(lines[2]))
+            throw new IllegalArgumentException("revocation artifact: unknown type: " + lines[2]);
+        long treeSize = Long.parseLong(lines[1]);
+        if (treeSize <= 0)
+            throw new IllegalArgumentException("revocation artifact: tree_size must be > 0");
+
+        byte[] cascBytes = Base64.getDecoder().decode(lines[3]);
+        Cascade cascade  = Cascade.decode(cascBytes);
+
+        // Verify signature — algorithm binding per SPEC.md.
+        byte[] bodyBytes = body.getBytes(StandardCharsets.UTF_8);
+        String keyPrefix = "\u2014 " + trust.issuerKeyName + " ";
+        boolean sigOk = false;
+        for (String line : sigPart.split("\n")) {
+            if (!line.startsWith(keyPrefix)) continue;
+            byte[] sigPayload = Base64.getDecoder().decode(line.substring(keyPrefix.length()).trim());
+            if (sigPayload.length < 4) continue;
+            byte[] sig = Arrays.copyOfRange(sigPayload, 4, sigPayload.length);
+            if (SignatureVerifier.verify(trust.sigAlg, bodyBytes, sig, trust.issuerPubKey)) {
+                sigOk = true; break;
+            }
+        }
+        if (!sigOk) throw new IllegalArgumentException("revocation artifact: signature verification failed");
+
+        return new CachedRevocation(cascade, treeSize);
+    }
 
     private record CheckpointResult(byte[] rootHash, long treeSize) {}
 

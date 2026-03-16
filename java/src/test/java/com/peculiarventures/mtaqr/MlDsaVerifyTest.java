@@ -77,9 +77,11 @@ public class MlDsaVerifyTest {
         System.out.println("note length: " + noteString.length());
 
         TrustConfig trust = TrustConfig.parse(trustJson);
+        String revArtifact = issuer.revocationArtifact();
         Verifier verifier = Verifier.builder()
                 .trust(trust)
                 .noteProvider(url -> java.util.concurrent.CompletableFuture.completedFuture(noteString))
+                .revocationProvider(url -> java.util.concurrent.CompletableFuture.completedFuture(revArtifact))
                 .build();
 
         // verify() returns VerifyOk on success, throws VerifyFail exceptionally on failure.
