@@ -85,6 +85,7 @@ export class Verifier {
   // from payloads with rapidly incrementing tree_size values.
   private static readonly MAX_CACHE_ENTRIES = 1000;
   private readonly cache = new Map<string, CachedCheckpoint>();
+  private readonly revocCache = new Map<string, { cascade: Cascade; treeSize: bigint }>();
 
   /**
    * @param trust       Trust configuration from the issuer.
@@ -413,7 +414,7 @@ export class Verifier {
     if (!sigLine) return { error: "issuer sig line not found" };
     const sigRaw = Buffer.from(sigLine.slice(prefix.length), "base64");
     if (sigRaw.length < 4) return { error: "sig line too short" };
-    const pub = Uint8Array.from(Buffer.from(trust.issuerPubKeyHex, "hex"));
+    const pub = trust.issuerPubKey;
     if (!verifySig(trust.sigAlg, new TextEncoder().encode(body), sigRaw.subarray(4), pub))
       return { error: "signature verification failed" };
     return { cascade, treeSize };
