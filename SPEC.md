@@ -27,6 +27,18 @@ what Version 40 can carry — but embedding a full signature per assertion leave
 almost no room for assertion content, and permanently binds the QR code to a
 specific key and algorithm at issuance time with no agility path.
 
+Among the currently standardized FIPS-approved post-quantum signature schemes
+(ML-DSA, SLH-DSA, FN-DSA), **none fit comfortably inside a Mode 0 payload**.
+FN-DSA-512 is technically possible at ~1,302 bytes total but leaves almost no
+headroom and requires controlled print/scan conditions. ML-DSA-44 and SLH-DSA
+are not feasible for Mode 0. This is a known gap in the current standardized
+PQC landscape, not a limitation of the protocol.
+
+The NIST "additional signatures" competition (Round 2 as of 2025) is
+specifically targeting schemes with small signatures and fast verification,
+properties well-matched to the Mode 0 envelope. Several candidates would fit
+comfortably if standardized — see §Mode 0 and Future PQC Algorithms.
+
 **Offline verification.** QR scanning happens without reliable network access.
 A design requiring a network call per scan fails at concert venues, border
 crossings, pharmacy counters, warehouse receiving docks, and transit gates.
@@ -883,8 +895,15 @@ MUST use the same `root_hash` bytes for both operations.
 **Best for:** Deployments where the issuer's checkpoint endpoint may be
 unreachable at scan time, or where payloads must be independently verifiable
 without a live backend service. Classical issuers (ECDSA P-256, Ed25519)
-keep the payload size manageable. PQC Mode 0 with FN-DSA-512 adds up to 666
-bytes for the issuer signature and requires controlled print and scan conditions.
+are the current practical choice for Mode 0 — payloads are ~440–700 bytes
+and scan comfortably at Version 18–20.
+
+For post-quantum issuers: FN-DSA-512 is technically in-bounds (~1,302 bytes
+total) but requires controlled print and scan conditions and leaves minimal
+headroom. No currently standardized PQC scheme fits comfortably. The protocol
+is designed to be algorithm-agnostic, and a `sig_alg` slot is reserved for
+future compact PQC schemes once standardized. See §Mode 0 and Future PQC
+Algorithms for the forward-looking assessment.
 
 **Revocation in Mode 0.** The payload is self-contained and carries no
 `revocation_url`. Revocation checking requires a separately cached artifact.
@@ -1811,6 +1830,67 @@ the credential expires before the next charge cycle anyway.
 | 0 Embedded | ML-DSA-44 | ~3,000 bytes | Not feasible | — |
 | 1 Cached | Any | ~513–563 bytes | Version 15–20 | General recommendation |
 | 2 Online | Any | ~30 bytes | Version 3–4 | Fixed infrastructure only |
+
+---
+
+## Mode 0 and Future PQC Algorithms
+
+The Mode 0 envelope has a practical size budget for the issuer signature of roughly
+400–700 bytes if the payload is to scan at a comfortable QR version (18–20) at
+Medium ECC. FN-DSA-512 fills that budget almost entirely; no other currently
+standardized FIPS post-quantum scheme fits. This is a gap in the current
+standardized landscape, not an architectural limitation of the protocol.
+
+The approximate Mode 0 payload budget is:
+
+```
+total ≈ proof bytes          (inner proof + outer proof, ≤ 12 × 32 = 384 bytes)
+      + checkpoint framing   (origin_len + origin + treeSize + entryIndex ≈ 60 bytes)
+      + root_hash            (32 bytes)
+      + issuer_sig_len + issuer_sig
+      + witness_count + N × 76 bytes per witness (key_id + timestamp + Ed25519 sig)
+      + tbs                  (assertion content, typically 80–150 bytes)
+```
+
+For a 2-witness quorum, the witness cosigs consume 1 + 2 × 76 = 153 bytes. The
+remaining budget for the issuer signature at a 700-byte total target is roughly
+700 − 384 − 60 − 32 − 2 − 153 − 120 ≈ **−51 bytes** — i.e., a tight squeeze even
+before accounting for TBS content. For Version 20 QR comfort the issuer signature
+needs to be well under 400 bytes.
+
+NIST's "additional signatures" standardization effort (Round 2 candidates as of
+2025) is specifically targeting schemes with small signatures and fast verification.
+Several candidates would fit comfortably within the Mode 0 envelope once standardized:
+
+**SQIsign** — isogeny-based, NIST Round 2 additional signature candidate. Signatures
+are 148 bytes (Level I), 224 bytes (Level III), or 292 bytes (Level V). Public keys
+are similarly compact. This is the clearest potential fit for Mode 0 PQC issuers;
+the current barrier is implementation maturity and the absence of standardized
+library support.
+
+**SNOVA** — multivariate, NIST Round 2 additional signature candidate. Level I
+parameters range from ~248-byte to ~379-byte signatures, with public keys of
+~1–2 KB (preloadable in the trust config). A well-chosen SNOVA parameter set
+would sit comfortably inside the Mode 0 budget.
+
+**MAYO** — multivariate, NIST Round 2 additional signature candidate. Level I
+signatures range from ~186 bytes to ~454 bytes depending on the public-key/
+signature tradeoff point. Public keys are larger (1.4–4.9 KB), but since trust
+configs are pre-loaded this is an operational rather than envelope concern.
+
+**HAWK** — lattice-based, NIST Round 2 additional signature candidate. HAWK-512
+gives ~555-byte signatures. Borderline for Mode 0 with a 2-witness quorum but
+viable if the witness count is kept low.
+
+Schemes with multi-kilobyte signatures (PERK, SDitH, MQOM, RYDE, LESS, CROSS,
+FAEST, and most hash-based constructions beyond SLH-DSA-SHA2-128s) are not
+suitable for Mode 0 regardless of their other properties.
+
+The protocol reserves `sig_alg` values 0–6 for current schemes and is designed
+to be extended. Once a compact PQC scheme is standardized and registered, it can
+be assigned a `sig_alg` value and used directly in Mode 0 payloads without any
+wire-format changes. The trust-config key preloading model means public-key size
+is not a QR-space concern; only signature size in the payload matters.
 
 ---
 
