@@ -640,8 +640,11 @@ volume. Use Mode 1 unless you have a specific reason to use another mode.
 
 ### Mode 2 is for fixed-infrastructure deployments
 
-Mode 2 produces the smallest possible payload (around 30 bytes). It requires
-network access at scan time to fetch both the checkpoint and the inclusion proof.
+Mode 2 produces the smallest possible payload. The payload contains the full TBS (all metadata and claims) plus log coordinates, but no proof hashes. At scan time the verifier fetches the inclusion proof from a tile server and the signed checkpoint from the issuer.
+
+Privacy property: because the verifier already holds the TBS from scanning the physical QR code, the tile server only needs to serve opaque 32-byte hashes. The tile server cannot reconstruct claims from hashes alone, so PII never leaves the physical credential.
+
+Operational requirement: network access at scan time.
 Use it only in environments where connectivity at scan time is guaranteed and
 the smallest QR code is a priority. Do not use Mode 2 where network access is
 unreliable — a failed fetch means the QR cannot be verified at all.

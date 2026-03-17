@@ -106,7 +106,11 @@ MTA-QR has three payload modes defined in the protocol. Modes 1 and 2 are implem
 
 **Mode 1 — cached checkpoint (offline after prefetch).** The payload includes the inclusion proof but not the checkpoint. The verifier resolves the checkpoint from its local cache; on cache miss it fetches once and caches the result. This is the default mode and the right choice for most deployments.
 
-**Mode 2 — online reference.** The payload contains only the log coordinates — no proof hashes. A scanner fetches the checkpoint from the issuer's endpoint and the inclusion proof from a tile server at scan time. Smallest payload. The security properties of a correctly verified Mode 2 payload are identical to Mode 1 — the inclusion proof is cryptographically verifiable regardless of how it was delivered. The practical difference is operational: Mode 2 requires network access at scan time. **The SDK verifier does not implement tile fetching** — it validates the checkpoint and TBS but does not complete the inclusion proof step. Use Mode 1 when offline verification matters. See the Mode 2 limitation in Known Limitations.
+**Mode 2 — online reference.** The payload contains the TBS (all metadata and claims) plus log coordinates, but no proof hashes. A scanner fetches the inclusion proof from a tile server at scan time and verifies it against the signed checkpoint. Smallest payload while retaining full metadata. The security properties of a correctly verified Mode 2 payload are identical to Mode 1 — the inclusion proof is cryptographically verifiable regardless of how it was delivered.
+
+The practical difference is operational: Mode 2 requires network access at scan time, and there is a useful privacy property — because the verifier already holds the TBS from the physical scan, the tile server only needs to serve opaque 32-byte hashes (the "connective tissue" for the proof path). The tile server never sees PII; it cannot reconstruct claims from hashes alone.
+
+**The SDK verifier does not implement tile fetching** — it validates the checkpoint, witnesses, and TBS but does not complete the inclusion proof step. Use Mode 1 when offline verification or no tile server is available. See the Mode 2 limitation in Known Limitations.
 
 ### Mode 1 — inclusion proof embedded (48 cells)
 
@@ -129,7 +133,7 @@ The issuer computes and embeds a two-phase tiled Merkle proof at issuance time. 
 
 ### Mode 2 — proof deferred (48 cells)
 
-The issuer emits no proof hashes. In production a scanner fetches the checkpoint and inclusion proof at scan time and verifies them cryptographically — Mode 2 has the same security properties as Mode 1 when fully implemented. The reference SDK validates checkpoint, witnesses, TBS, and expiry but does not implement tile fetching. See the Mode 2 limitation below.
+The issuer embeds the TBS (full metadata) plus log coordinates, but emits no proof hashes. In production a scanner fetches the inclusion proof from a tile server at scan time and verifies it against the signed checkpoint — Mode 2 has identical security properties to Mode 1 when fully implemented. Privacy property: the tile server serves only hashes, never sees PII. The reference SDK validates checkpoint, witnesses, TBS, and expiry but does not implement tile fetching. See the Mode 2 limitation below.
 
 | Issuer | Algorithm | Go | TS | Rust | Java |
 |--------|-----------|:--:|:--:|:----:|:----:|
@@ -220,7 +224,9 @@ All four implementations enforce the following and they are covered by the test 
 
 These are genuine gaps that should be addressed before production use. They are tracked here so they are not lost between sessions.
 
-**Mode 2 tile server not implemented.** The SDK verifier accepts Mode 2 payloads without verifying Merkle inclusion. A complete Mode 2 deployment requires a tile server serving proof tiles at `GET /tile/{level}/{index}` and a scanner-side tile-fetching verifier that calls it. The protocol for tile format and addressing is not yet defined in `SPEC.md`.
+**Mode 2 tile server not implemented.** The SDK verifier accepts Mode 2 payloads without verifying Merkle inclusion. A complete Mode 2 deployment requires a tile server serving proof tiles at `GET /tile/{level}/{index}` and a scanner-side tile-fetching verifier that calls it. The tile server API and addressing scheme are not yet defined in `SPEC.md`.
+
+**Revocation delay.** When an entry is revoked, the revocation is effective only once a new checkpoint has been issued and the verifier's cached artifact becomes stale (STALE_THRESHOLD=32 entries). Between revocation and cache expiry, a revoked credential may still pass verification. This is an inherent trade-off in transparency log models — the window is bounded by checkpoint frequency and STALE_THRESHOLD, not unbounded. Deployments with strict revocation requirements should set short checkpoint intervals and tune STALE_THRESHOLD accordingly.
 
 **Revocation is implemented** in all four language SDKs (Go, TypeScript, Rust, Java). Issuers serve a signed Bloom filter cascade at `GET /revoked` and accept `POST /revoke` for demo purposes. Verifiers fetch the artifact on cache miss, verify the issuer signature with algorithm binding, apply a staleness check (STALE_THRESHOLD=32 entries), and query the cascade fail-closed. The cascade algorithm is cross-verified against locked test vector bytes in all four languages. See SPEC.md §Revocation for the normative wire format and construction parameters.
 
