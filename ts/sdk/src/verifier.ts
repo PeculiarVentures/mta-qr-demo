@@ -81,11 +81,9 @@ export type NoteProvider = (url: string) => string | Promise<string>;
 export type RevocationProvider = (url: string) => string | Promise<string>;
 
 export class Verifier {
-  private readonly trust: TrustConfig;
+  private readonly anchors = new Map<bigint, TrustConfig>();
   private readonly noteProvider:        NoteProvider       | undefined;
   private readonly revocationProvider:  RevocationProvider | undefined;
-  // Bounded cache: cap at MAX_CACHE_ENTRIES to prevent memory exhaustion
-  // from payloads with rapidly incrementing tree_size values.
   private static readonly MAX_CACHE_ENTRIES = 1000;
   private readonly cache = new Map<string, CachedCheckpoint>();
   private readonly revocCache = new Map<string, { cascade: Cascade; treeSize: bigint }>();
@@ -96,11 +94,31 @@ export class Verifier {
    *                    or offline use). If omitted, the verifier fetches the note
    *                    from `trust.checkpointUrl` via HTTP.
    */
-  constructor(trust: TrustConfig, noteProvider?: NoteProvider, revocationProvider?: RevocationProvider) {
-    this.trust              = trust;
+  /**
+   * Create a Verifier. If `trust` is provided it is registered as the first anchor
+   * (backwards-compatible single-anchor usage). For multi-anchor, omit `trust` and
+   * call `addAnchor()` for each issuer.
+   */
+  constructor(trust?: TrustConfig, noteProvider?: NoteProvider, revocationProvider?: RevocationProvider) {
     this.noteProvider       = noteProvider;
     this.revocationProvider = revocationProvider;
+    if (trust) this.addAnchor(trust);
   }
+
+  /** Register a trusted issuer. Returns `this` for chaining. */
+  addAnchor(trust: TrustConfig): this {
+    const existing = this.anchors.get(trust.originId);
+    if (existing && existing.origin !== trust.origin) {
+      throw new Error(
+        `origin_id collision: 0x${trust.originId.toString(16).padStart(16, "0")} ` +
+        `is shared by "${existing.origin}" and "${trust.origin}"`);
+    }
+    this.anchors.set(trust.originId, trust);
+    return this;
+  }
+
+  /** All registered anchors. */
+  get registeredAnchors(): TrustConfig[] { return [...this.anchors.values()]; }
 
   /**
    * Verify a QR code payload.
@@ -143,29 +161,31 @@ export class Verifier {
     }
     add("entry index", true, `entry_index=${p.entryIndex} valid`);
 
-    // 3. Origin ID matches trust config.
-    if (p.originId !== this.trust.originId) {
-      return fail("origin id",
-        `payload origin_id 0x${p.originId.toString(16)} does not match trust config`);
+    // 3. Trust anchor lookup — multi-anchor routing by origin_id.
+    const trust = this.anchors.get(p.originId);
+    if (!trust) {
+      return fail("trust anchor",
+        `no anchor for origin_id 0x${p.originId.toString(16).padStart(16,"0")}` +
+        ` — call addAnchor() with the issuer trust config first`);
     }
-    add("origin id", true, `matches trust config: "${this.trust.origin}"`);
+    add("trust anchor", true, `found: "${trust.origin}"`);
 
     // 4. Self-describing origin consistency.
-    if (p.selfDescrib && p.origin && p.origin !== this.trust.origin) {
+    if (p.selfDescrib && p.origin && p.origin !== trust.origin) {
       return fail("origin consistency",
-        `envelope origin "${p.origin}" != trust config "${this.trust.origin}"`);
+        `envelope origin "${p.origin}" != trust config "${trust.origin}"`);
     }
     if (p.selfDescrib) add("origin consistency", true, `envelope matches trust config`);
 
     // 5. Algorithm binding.
-    if (p.sigAlg !== this.trust.sigAlg) {
+    if (p.sigAlg !== trust.sigAlg) {
       return fail("algorithm binding",
-        `payload sig_alg=${p.sigAlg} but trust config requires ${this.trust.sigAlg}`);
+        `payload sig_alg=${p.sigAlg} but trust config requires ${trust.sigAlg}`);
     }
     add("algorithm binding", true, `sig_alg=${p.sigAlg} matches trust config`);
 
     // 6. Checkpoint resolution.
-    const cacheKey = `${this.trust.origin}:${p.treeSize}`;
+    const cacheKey = `${trust.origin}:${p.treeSize}`;
     let rootHash: Uint8Array;
     const cached = this.cache.get(cacheKey);
     if (cached) {
@@ -173,16 +193,16 @@ export class Verifier {
       add("checkpoint", true, `cache hit · tree_size=${p.treeSize} · age=${age}s`);
       rootHash = cached.rootHash;
     } else {
-      add("checkpoint", false, `cache miss · fetching ${this.trust.checkpointUrl}`);
+      add("checkpoint", false, `cache miss · fetching ${trust.checkpointUrl}`);
       let fetched: Uint8Array;
       let fetchedSize: bigint;
       try {
-        [fetched, fetchedSize] = await this.fetchAndVerifyCheckpoint(p.treeSize);
+        [fetched, fetchedSize] = await this.fetchAndVerifyCheckpoint(p.treeSize, trust);
       } catch (e) {
         return fail("checkpoint fetch", String(e));
       }
       add("checkpoint fetch", true,
-        `issuer sig ✓ · ${this.trust.witnessQuorum}/${this.trust.witnessQuorum} witnesses ✓ · tree_size=${fetchedSize}`);
+        `issuer sig ✓ · ${trust.witnessQuorum}/${trust.witnessQuorum} witnesses ✓ · tree_size=${fetchedSize}`);
       rootHash = fetched;
       if (this.cache.size >= Verifier.MAX_CACHE_ENTRIES) {
         // Evict the oldest entry (Maps preserve insertion order).
@@ -210,7 +230,7 @@ export class Verifier {
     } else {
       // Mode 1 (cached): two-phase tiled Merkle proof embedded in payload.
       const globalIdx  = Number(p.entryIndex);
-      const batchSize  = this.trust.batchSize;
+      const batchSize  = trust.batchSize;
       const innerIdx   = globalIdx % batchSize;
       const batchIdx   = Math.floor(globalIdx / batchSize);
       const numBatches = Math.ceil(Number(p.treeSize) / batchSize);
@@ -249,7 +269,7 @@ export class Verifier {
     add("cbor decode", true, `schema_id=${entry.schemaId} issued=${entry.times[0]} expires=${entry.times[1]}`);
 
     // 10. Revocation check — SPEC.md §Revocation.
-    const revocResult = await this.checkRevocation(p.entryIndex, p.treeSize, this.trust);
+    const revocResult = await this.checkRevocation(p.entryIndex, p.treeSize, trust);
     if (revocResult.revoked) return fail("revocation", revocResult.reason);
     add("revocation", true, revocResult.reason);
 
@@ -261,14 +281,14 @@ export class Verifier {
     }
     add("expiry", true, `valid · ${entry.times[1] - now}s remaining`);
 
-    add("complete", true, `all checks passed · entry_index=${p.entryIndex} · origin="${this.trust.origin}"`);
+    add("complete", true, `all checks passed · entry_index=${p.entryIndex} · origin="${trust.origin}"`);
 
     return ok({
       valid:      true,
       mode:       p.mode,
       entryIndex: Number(p.entryIndex),
       treeSize:   Number(p.treeSize),
-      origin:     this.trust.origin,
+      origin:     trust.origin,
       schemaId:   entry.schemaId,
       issuedAt:   entry.times[0],
       expiresAt:  entry.times[1],
@@ -278,20 +298,22 @@ export class Verifier {
 
   private async fetchAndVerifyCheckpoint(
     requiredSize: bigint,
+    trust: TrustConfig,
   ): Promise<[Uint8Array, bigint]> {
     let note: string;
     if (this.noteProvider) {
-      note = await this.noteProvider(this.trust.checkpointUrl);
+      note = await this.noteProvider(trust.checkpointUrl);
     } else {
-      const res = await fetch(this.trust.checkpointUrl);
+      const res = await fetch(trust.checkpointUrl);
       note = await res.text();
     }
-    return this.verifyNote(note, requiredSize);
+    return this.verifyNote(note, requiredSize, trust);
   }
 
   private async verifyNote(
     note: string,
     requiredSize: bigint,
+    trust: TrustConfig,
   ): Promise<[Uint8Array, bigint]> {
     const blankIdx = note.indexOf("\n\n");
     if (blankIdx < 0) throw new Error("note missing blank-line separator");
@@ -301,8 +323,8 @@ export class Verifier {
     const rest     = note.slice(blankIdx + 2);
 
     const { origin, treeSize, rootHash } = parseCheckpointBody(body);
-    if (origin !== this.trust.origin) {
-      throw new Error(`origin mismatch: got "${origin}" want "${this.trust.origin}"`);
+    if (origin !== trust.origin) {
+      throw new Error(`origin mismatch: got "${origin}" want "${trust.origin}"`);
     }
     if (treeSize < requiredSize) {
       throw new Error(`tree_size ${treeSize} < required ${requiredSize}`);
@@ -315,12 +337,12 @@ export class Verifier {
     // both 64 bytes, and ML-DSA-44 at 2420 bytes would break any length heuristic.
     let issuerOk = false;
     for (const line of sigLines) {
-      if (!line.includes(this.trust.issuerKeyName)) continue;
+      if (!line.includes(trust.issuerKeyName)) continue;
       const raw = lastFieldBase64(line);
       if (!raw || raw.length < 4) continue;
       // Per c2sp.org/signed-note: first 4 bytes are the key hash; remaining bytes are the sig.
       const rawSig = raw.slice(4);
-      if (verifySig(this.trust.sigAlg, body, rawSig, this.trust.issuerPubKey)) {
+      if (verifySig(trust.sigAlg, body, rawSig, trust.issuerPubKey)) {
         issuerOk = true;
         break;
       }
@@ -339,15 +361,15 @@ export class Verifier {
         (acc, b, i) => acc | (BigInt(b) << BigInt((7 - i) * 8)), BigInt(0)
       );
       const sig     = raw.slice(12, 76);
-      for (const w of this.trust.witnesses) {
+      for (const w of trust.witnesses) {
         if (!keyHash.every((b, i) => b === w.keyId[i])) continue;
         if (verifySig(SIG_ALG_ED25519, cosignatureMessage(body, ts), sig, w.pubKey)) {
           verified.add(w.name);
         }
       }
     }
-    if (verified.size < this.trust.witnessQuorum) {
-      throw new Error(`witness quorum not met: ${verified.size}/${this.trust.witnessQuorum}`);
+    if (verified.size < trust.witnessQuorum) {
+      throw new Error(`witness quorum not met: ${verified.size}/${trust.witnessQuorum}`);
     }
 
     return [rootHash, treeSize];

@@ -29,7 +29,8 @@
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let trust = TrustConfig::load_file("trust.json").await?;
-//!     let verifier = Verifier::new(trust);
+//!     let mut verifier = Verifier::new();
+//!     verifier.add_anchor(trust)?;
 //!     let payload_bytes = vec![0u8; 0]; // placeholder
 //!     let ok = verifier.verify(&payload_bytes).await?;
 //!     println!("{:?}", ok.claims);
@@ -365,7 +366,7 @@ mod revocation_tests {
             Box::new(move |_: &str| -> anyhow::Result<String> { Ok(note.clone()) });
         let revoc_provider: crate::verifier::RevocationProvider =
             Box::new(move |_: &str| -> anyhow::Result<String> { Ok(revoc.clone()) });
-        Verifier::with_revocation_provider(trust, note_provider, revoc_provider)
+        { let mut v = Verifier::with_revocation_provider(note_provider, revoc_provider); v.add_anchor(trust).unwrap(); v }
     }
 
     #[tokio::test]
@@ -418,18 +419,14 @@ mod revocation_tests {
         let trust   = TrustConfig::parse_str(&tc_json).unwrap();
         let note    = issuer.checkpoint_note().await.unwrap();
         let revoc   = issuer.revocation_artifact().await.unwrap_or_default();
-        let v = Verifier::with_revocation_provider(
-            trust,
+        let mut v = Verifier::with_revocation_provider(
             Box::new(move |_| Ok(note.clone())),
             Box::new(move |_| Ok(revoc.clone())),
         );
+        v.add_anchor(trust).unwrap();
 
-        // Craft a mode=0 payload: version=1, flags=(sigAlg=6<<2)|(mode=0)=0x18
-        // followed by origin_id(8) + tree_size(8) + entry_index(8) + proof counts(2) + tbs_len(2) + tbs(1)
-        // + root_hash(32) + issuer_sig_len(2) + issuer_sig(64) + cosig_count(1)
-        let trust2 = TrustConfig::parse_str(
-            &issuer.trust_config_json("http://localhost:0/checkpoint").await.unwrap()
-        ).unwrap();
+        let tc_json2 = issuer.trust_config_json("http://localhost:0/checkpoint").await.unwrap();
+        let trust2 = TrustConfig::parse_str(&tc_json2).unwrap();
         let origin_id = trust2.origin_id.to_be_bytes();
         // Build a payload with mode=0 set in flags but no embedded checkpoint fields.
         // The Rust decoder reads up to TBS then stops — mode=0 trailing fields are
