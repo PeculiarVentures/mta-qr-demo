@@ -323,13 +323,19 @@ const server = createServer(async (req, res) => {
 
 function buildMode0Payload(entryIdx: number, tbs: Uint8Array): Uint8Array {
   const ckpt = latestCkpt!;
-  // Build the two-phase tiled inclusion proof (same as Mode 1).
+  // Build the two-phase tiled inclusion proof (same pattern as buildMode1Payload).
   const batchIdx = Math.floor(entryIdx / BATCH_SIZE);
   const innerIdx = entryIdx % BATCH_SIZE;
-  const batchData = batchIdx < batches.length ? batches[batchIdx] : currentBatch;
-  const batchHashes = (batchData as typeof currentBatch).map((e: {hash: Uint8Array}) => e.hash);
-  const batchSz = batchHashes.length;
-  const innerProof = inclusionProof(batchHashes, innerIdx, batchSz);
+  let batchEntryHashes: Uint8Array[];
+  let batchSz: number;
+  if (batchIdx < batches.length) {
+    batchEntryHashes = batches[batchIdx].entries.map(e => e.hash);
+    batchSz = batches[batchIdx].entries.length;
+  } else {
+    batchEntryHashes = currentBatch.map(e => e.hash);
+    batchSz = currentBatch.length;
+  }
+  const innerProof = inclusionProof(batchEntryHashes, innerIdx, batchSz);
   const allRoots = batchRoots();
   const outerProof = inclusionProof(allRoots, batchIdx, allRoots.length);
   const allProof = [...innerProof, ...outerProof];
