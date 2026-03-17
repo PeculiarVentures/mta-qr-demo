@@ -49,6 +49,30 @@ export function checkpointBody(
   return new TextEncoder().encode(`${origin}\n${treeSize}\n${rootHashB64}\n`);
 }
 
+/**
+ * Checkpoint body with a 4th extension line committing to the revocation artifact.
+ * The 4th line is `revoc:<hex(SHA-256(artifactBytes))>\n`.
+ * Per c2sp.org/tlog-checkpoint, extension lines are part of the authenticated
+ * content — all signatures (issuer + witness cosigs) cover this line.
+ */
+export function checkpointBodyWithRevoc(
+  origin: string,
+  treeSize: bigint | number,
+  rootHash: Uint8Array,
+  revocArtifact: Uint8Array | string,
+): Uint8Array {
+  const base = checkpointBody(origin, treeSize, rootHash);
+  const artBytes = typeof revocArtifact === "string"
+    ? new TextEncoder().encode(revocArtifact) : revocArtifact;
+  const hash = Buffer.from(
+    createHash("sha256").update(artBytes).digest()
+  ).toString("hex");
+  const ext = new TextEncoder().encode(`revoc:${hash}\n`);
+  const combined = new Uint8Array(base.length + ext.length);
+  combined.set(base); combined.set(ext, base.length);
+  return combined;
+}
+
 /** Sign a checkpoint body. Returns 64-byte Ed25519 signature. */
 export function signCheckpointBody(body: Uint8Array, privKeySeed: Uint8Array): Uint8Array {
   return new Uint8Array(nodeSign(null, Buffer.from(body), seedToPrivKey(privKeySeed)));

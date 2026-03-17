@@ -14,6 +14,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -32,6 +33,22 @@ func Body(origin string, treeSize uint64, rootHash []byte) []byte {
 		strconv.FormatUint(treeSize, 10) + "\n" +
 		rootHashB64 + "\n"
 	return []byte(body)
+}
+
+// BodyWithRevoc formats a checkpoint body with a 4th extension line
+// committing to the revocation artifact. The 4th line is:
+//
+//	revoc:<hex(SHA-256(artifact_bytes))>
+//
+// Per c2sp.org/tlog-checkpoint, extension lines are included in the
+// authenticated content and will be covered by all signatures (issuer
+// and witness cosignatures). Verifiers that do not recognise extension
+// lines MUST ignore them, so this is backward-compatible.
+func BodyWithRevoc(origin string, treeSize uint64, rootHash []byte, revocArtifact []byte) []byte {
+	base := Body(origin, treeSize, rootHash)
+	h := sha256.Sum256(revocArtifact)
+	extLine := "revoc:" + hex.EncodeToString(h[:]) + "\n"
+	return append(base, []byte(extLine)...)
 }
 
 // Sign signs the checkpoint body with an Ed25519 private key.

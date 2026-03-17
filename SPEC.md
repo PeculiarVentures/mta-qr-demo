@@ -332,14 +332,42 @@ lines separated by a blank line.
 <origin>\n
 <tree_size decimal>\n
 <root_hash_base64>\n
+[revoc:<hex(SHA-256(revocation_artifact_bytes))>\n]  ← optional extension line
 ```
 
-The body is exactly three lines, each terminated with `\n`, including the
-final line. The trailing newline on the root hash line is part of the
-authenticated content. Implementations that strip trailing whitespace before
-verifying signatures will fail. The root hash is base64-encoded per RFC 4648 §4
-(standard alphabet, with `=` padding, no line breaks — the exact base64
-encoding matters for signature verification).
+The body has three mandatory lines and one optional extension line, each
+terminated with `\n` including the final line. The trailing newline is part of
+the authenticated content. Per c2sp.org/tlog-checkpoint, extension lines are
+included in the authenticated content and are covered by all signatures (issuer
+and witness cosignatures). Verifiers that do not recognise a particular
+extension line MUST ignore it — so the `revoc:` extension is backward-compatible
+with existing signed-note infrastructure.
+
+The root hash is base64-encoded per RFC 4648 §4 (standard alphabet, with `=`
+padding, no line breaks — the exact base64 encoding matters for signature
+verification). Implementations that strip trailing whitespace before verifying
+signatures will fail.
+
+**Revocation commitment extension line.** When a revocation artifact is
+available at checkpoint time, the issuer appends a `revoc:` extension line:
+
+```
+revoc:<lowercase-hex(SHA-256(revocation_artifact_bytes))>\n
+```
+
+The hash is computed over the complete revocation artifact bytes — the full
+signed note including the body, blank line, and all signature lines. This makes
+the revocation state tamper-evident: any witness that cosigns a checkpoint also
+attests to the revocation artifact in effect at that tree size. Verifiers
+receiving a cached revocation artifact MAY verify it against this hash to
+detect tampering. Verifiers that do not support this check MUST still accept
+the checkpoint (the line is optional from the verifier's perspective).
+
+Mode 0 payloads embed their own checkpoint signatures. Those signatures are
+computed over the plain 3-line body (without the `revoc:` line) so that the
+Mode 0 verifier can reconstruct the exact signed body from the payload fields
+`origin`, `tree_size`, and `root_hash` alone. The `revoc:` commitment is
+carried only in Mode 1/2 served checkpoints.
 
 **Full served note** (body + blank line + signature lines):
 
@@ -347,6 +375,7 @@ encoding matters for signature verification).
 <origin>
 <tree_size decimal>
 <root_hash_base64>
+revoc:<hex(SHA-256(artifact))>          ← present when revoc artifact exists
 
 — <issuer_key_name> <base64(4_byte_key_hash || issuer_signature)>
 — <witness_name_1> <base64(4_byte_key_hash || 8_byte_timestamp || 64_byte_ed25519_sig)>

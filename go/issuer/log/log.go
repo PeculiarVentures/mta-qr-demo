@@ -278,7 +278,19 @@ func (l *Log) publishCheckpointLocked() error {
 	}
 
 	treeSize := l.totalEntries()
-	body := checkpoint.Body(l.origin, treeSize, parentRoot)
+
+	// Build the revocation artifact first so its hash can be committed
+	// in the checkpoint body, making the revocation state witnessable.
+	artifact, revocErr := l.buildRevocationArtifactLocked()
+
+	// Build checkpoint body — with revoc hash if artifact is available.
+	var body []byte
+	if revocErr == nil && len(artifact) > 0 {
+		body = checkpoint.BodyWithRevoc(l.origin, treeSize, parentRoot, artifact)
+	} else {
+		body = checkpoint.Body(l.origin, treeSize, parentRoot)
+	}
+
 	isig, err := l.issuer.Sign(body)
 	if err != nil {
 		return fmt.Errorf("issuer sign: %w", err)
@@ -296,10 +308,8 @@ func (l *Log) publishCheckpointLocked() error {
 	l.latestCkpt = &SignedCheckpoint{
 		TreeSize: treeSize, RootHash: parentRoot, Body: body, IssuerSig: isig, Cosigs: cosigs,
 	}
-
-	// Build revocation artifact alongside every checkpoint.
-	if art, err := l.buildRevocationArtifactLocked(); err == nil {
-		l.latestRevocation = art
+	if revocErr == nil {
+		l.latestRevocation = artifact
 	}
 	return nil
 }
@@ -419,6 +429,23 @@ func (l *Log) buildMode0PayloadLocked(globalIdx uint64, tbs []byte) ([]byte, err
 
 	allProof := append(innerProof, outerProof...)
 
+	// Mode 0 embeds the checkpoint inline. The verifier reconstructs the
+	// checkpoint body from (origin, treeSize, rootHash) using the canonical
+	// 3-line form — so Mode 0 must use a 3-line-body signature, not the
+	// 4-line body that may be in ckpt.IssuerSig when revoc is active.
+	// Re-sign now with the plain 3-line body.
+	plainBody := checkpoint.Body(l.origin, ckpt.TreeSize, ckpt.RootHash)
+	m0Sig, err := l.issuer.Sign(plainBody)
+	if err != nil { return nil, fmt.Errorf("mode 0 issuer sign: %w", err) }
+	m0Cosigs := make([]payload.WitnessCosig, len(l.witnesses))
+	ts0 := uint64(time.Now().Unix())
+	for i, w := range l.witnesses {
+		wsig := checkpoint.SignCosignature(plainBody, ts0, w.PrivKey)
+		var sigArr [64]byte
+		copy(sigArr[:], wsig)
+		m0Cosigs[i] = payload.WitnessCosig{KeyID: w.KeyID, Timestamp: ts0, Signature: sigArr}
+	}
+
 	p := &payload.Payload{
 		Version: 0x01, Mode: payload.ModeEmbedded, SigAlg: l.issuer.SigAlg(),
 		DualSig: false, SelfDescrib: true,
@@ -428,8 +455,8 @@ func (l *Log) buildMode0PayloadLocked(globalIdx uint64, tbs []byte) ([]byte, err
 		InnerProofCount: uint8(len(innerProof)),
 		TBS:             tbs,
 		RootHash:        ckpt.RootHash,
-		IssuerSig:       ckpt.IssuerSig,
-		Cosigs:          ckpt.Cosigs,
+		IssuerSig:       m0Sig,
+		Cosigs:          m0Cosigs,
 	}
 	return payload.Encode(p)
 }

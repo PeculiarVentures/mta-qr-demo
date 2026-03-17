@@ -15,7 +15,7 @@ import { encodeTbs, encodeNullTbs, decodeTbs, DataAssertionEntry, Claims } from 
 import { Cascade } from "./cascade.js";
 import { entryHash, inclusionProof, computeRoot } from "./merkle.js";
 import {
-  checkpointBody, signCheckpointBody, signCosignature,
+  checkpointBody, checkpointBodyWithRevoc, signCheckpointBody, signCosignature,
   noteKeyId, witnessKeyId, computeOriginId, pubKeyFromSeed, generateSeed,
 } from "./checkpoint.js";
 import {
@@ -274,7 +274,12 @@ export class Issuer {
   private async publishCheckpoint(): Promise<void> {
     const parentRoot = computeRoot(this.batchRoots());
     const treeSize   = this.totalEntries();
-    const body       = checkpointBody(this.origin, BigInt(treeSize), parentRoot);
+    // Commit revocation state into the checkpoint body so witnesses attest to it.
+    const revocArt = this.latestRevArtifact;
+    const body = revocArt
+      ? checkpointBodyWithRevoc(this.origin, BigInt(treeSize), parentRoot,
+          new TextEncoder().encode(revocArt))
+      : checkpointBody(this.origin, BigInt(treeSize), parentRoot);
     const issuerSig  = await this.signer.sign(body);
     const ts         = BigInt(Math.floor(Date.now() / 1000));
     const cosigs: WitnessCosig[] = this.witnesses.map(w => {

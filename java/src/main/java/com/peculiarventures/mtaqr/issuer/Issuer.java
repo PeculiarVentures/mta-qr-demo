@@ -90,8 +90,9 @@ public final class Issuer {
     private record Batch(List<LogEntry> entries, byte[] root) {}
 
     private record SignedCheckpoint(
-        long treeSize, byte[] rootHash, byte[] body, byte[] issuerSig,
-        List<WitnessCosig> cosigs) {}
+        long treeSize, byte[] rootHash,
+        byte[] body,      byte[] issuerSig,  List<WitnessCosig> cosigs,
+        byte[] plainBody, byte[] plainSig,   List<WitnessCosig> plainCosigs) {}
 
     private record WitnessCosig(byte[] keyId, long timestamp, byte[] signature) {}
 
@@ -269,23 +270,43 @@ public final class Issuer {
             treeSize = totalEntriesLocked();
         }
         byte[] parentRoot = merkleRoot(bRoots);
-        byte[] body       = checkpointBody(origin, treeSize, parentRoot);
+        byte[] plainBody = checkpointBody(origin, treeSize, parentRoot);
+        // Build revocation artifact first; commit its hash in the checkpoint body.
+        String revocSnap;
+        synchronized (lock) { revocSnap = latestRevArtifact; }
+        byte[] body = (revocSnap != null)
+            ? checkpointBodyWithRevoc(origin, treeSize, parentRoot,
+                revocSnap.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+            : plainBody;
+        final byte[] finalBody = body, finalPlainBody = plainBody;
 
-        return signer.sign(body).thenAccept(issuerSig -> {
+        return signer.sign(body).thenCompose(issuerSig ->
+            signer.sign(plainBody).thenAccept(plainSig -> {
             long ts = Instant.now().getEpochSecond();
             List<WitnessCosig> cosigs = new ArrayList<>();
+            List<WitnessCosig> plainCosigs = new ArrayList<>();
+            boolean same = java.util.Arrays.equals(finalBody, finalPlainBody);
             for (WitnessKey w : witnesses) {
-                byte[] msg = cosignatureMessage(body, ts);
+                byte[] msg = cosignatureMessage(finalBody, ts);
                 Ed25519Signer sv = new Ed25519Signer();
-                sv.init(true, w.priv());
-                sv.update(msg, 0, msg.length);
-                cosigs.add(new WitnessCosig(w.keyId(), ts, sv.generateSignature()));
+                sv.init(true, w.priv()); sv.update(msg, 0, msg.length);
+                byte[] sig = sv.generateSignature();
+                cosigs.add(new WitnessCosig(w.keyId(), ts, sig));
+                if (same) { plainCosigs.add(new WitnessCosig(w.keyId(), ts, sig)); }
+                else {
+                    byte[] pmsg = cosignatureMessage(finalPlainBody, ts);
+                    Ed25519Signer pv = new Ed25519Signer();
+                    pv.init(true, w.priv()); pv.update(pmsg, 0, pmsg.length);
+                    plainCosigs.add(new WitnessCosig(w.keyId(), ts, pv.generateSignature()));
+                }
             }
             synchronized (lock) {
-                latestCkpt = new SignedCheckpoint(treeSize, parentRoot, body, issuerSig, cosigs);
+                latestCkpt = new SignedCheckpoint(
+                    treeSize, parentRoot, finalBody, issuerSig, cosigs,
+                    finalPlainBody, plainSig, plainCosigs);
                 latestRevArtifact = buildRevocationArtifact(treeSize);
             }
-        });
+        }));
     }
 
     private byte[] buildPayload(long globalIdx, byte[] tbs) {
@@ -322,11 +343,11 @@ public final class Issuer {
             // root_hash (32 bytes)
             out.writeBytes(ckpt.rootHash());
             // issuer_sig_len (2 bytes big-endian) + issuer_sig
-            int slen = ckpt.issuerSig().length;
+            int slen = ckpt.plainSig().length;
             out.write((slen >> 8) & 0xff); out.write(slen & 0xff);
-            out.writeBytes(ckpt.issuerSig());
+            out.writeBytes(ckpt.plainSig());
             // witness_count (1 byte) + cosigs
-            List<WitnessCosig> cosigs0 = ckpt.cosigs();
+            List<WitnessCosig> cosigs0 = ckpt.plainCosigs();
             out.write(cosigs0.size() & 0xff);
             for (WitnessCosig c : cosigs0) {
                 out.writeBytes(c.keyId());
@@ -535,6 +556,23 @@ public final class Issuer {
     }
 
     // --- Checkpoint ---
+
+    /** Checkpoint body with 4th extension line: revoc:<hex(SHA-256(artifact))>\n */
+    public static byte[] checkpointBodyWithRevoc(
+            String origin, long treeSize, byte[] rootHash, byte[] revocArtifact) {
+        byte[] base = checkpointBody(origin, treeSize, rootHash);
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(revocArtifact);
+            StringBuilder hex = new StringBuilder();
+            for (byte b : hash) hex.append(String.format("%02x", b & 0xff));
+            byte[] ext = ("revoc:" + hex + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] combined = new byte[base.length + ext.length];
+            System.arraycopy(base, 0, combined, 0, base.length);
+            System.arraycopy(ext, 0, combined, base.length, ext.length);
+            return combined;
+        } catch (java.security.NoSuchAlgorithmException e) { throw new RuntimeException(e); }
+    }
 
     public static byte[] checkpointBody(String origin, long treeSize, byte[] rootHash) {
         String b64 = Base64.getEncoder().encodeToString(rootHash);

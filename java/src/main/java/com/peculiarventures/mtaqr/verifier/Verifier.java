@@ -561,6 +561,16 @@ public final class Verifier {
         long treeSize     = Long.parseUnsignedLong(lines[1]);
         byte[] rootHash   = Base64.getDecoder().decode(lines[2]);
 
+        // Extract optional revoc: extension line from the checkpoint body.
+        String revocHashHex = null;
+        for (int i = 3; i < lines.length; i++) {
+            if (lines[i].startsWith("revoc:")) {
+                revocHashHex = lines[i].substring("revoc:".length());
+                break;
+            }
+        }
+        @SuppressWarnings("unused") String _revocHash = revocHashHex; // for future full auditability
+
         if (!bodyOrigin.equals(trust.origin))
             throw new RuntimeException("origin mismatch: " + bodyOrigin);
         if (treeSize < requiredSize)
