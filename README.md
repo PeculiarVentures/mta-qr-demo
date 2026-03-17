@@ -188,7 +188,7 @@ Issuer.builder().origin("...").mode(2).signer(signer).build()
 
 The `VerifyOk`/`VerifyResult` returned by `verify()` includes a `mode` field so callers can distinguish the two cases.
 
-**Mode 2 tile fetching not implemented.** This SDK's verifier does **not** fetch or verify the inclusion proof for Mode 2 payloads. It validates the checkpoint, witness cosignatures, TBS structure, expiry, and `entry_index < tree_size`, then returns a result marked `mode=2`. The inclusion proof is cryptographically verifiable — when a complete Mode 2 scanner fetches the proof and checks it against the witnessed root, the security properties are identical to Mode 1. Building that scanner requires a tile-fetching implementation and a defined tile server API, neither of which exists yet. Use Mode 1 when you need inclusion proof verification today.
+**Mode 2 tile fetching not implemented.** This SDK's verifier does **not** fetch or verify the Merkle inclusion proof for Mode 2 payloads. It validates the checkpoint, witness cosignatures, TBS structure, expiry, and `entry_index < tree_size`, then returns a result with `mode=2`. The `mode` field lets callers gate on this — a `mode=2` result is not proof of Merkle inclusion. The tile server API is now defined in SPEC.md §Verification Flow (Mode 2); a production scanner must additionally fetch inner and outer tiles and run the two-phase proof. Use Mode 1 when inclusion proof verification is required today.
 
 ---
 
@@ -228,7 +228,7 @@ All four implementations enforce the following and they are covered by the test 
 
 These are genuine gaps that should be addressed before production use. They are tracked here so they are not lost between sessions.
 
-**Mode 2 tile server not implemented.** The SDK verifier accepts Mode 2 payloads without verifying Merkle inclusion. A complete Mode 2 deployment requires a tile server serving proof tiles at `GET /tile/{level}/{index}` and a scanner-side tile-fetching verifier that calls it. The tile server API and addressing scheme are not yet defined in `SPEC.md`.
+**Mode 2 tile fetching not implemented.** The SDK verifier validates the checkpoint, witnesses, TBS, revocation, and expiry for Mode 2 payloads but does not fetch or verify the Merkle inclusion proof. A production Mode 2 scanner must also fetch inner and outer tiles (see SPEC.md §Verification Flow (Mode 2) for the tile API), verify the two-phase proof, and only then treat the entry as fully verified. The tile server reference implementation does not yet exist.
 
 **Revocation delay.** When an entry is revoked, the revocation is effective only once a new checkpoint has been issued and the verifier's cached artifact becomes stale (STALE_THRESHOLD=32 entries). Between revocation and cache expiry, a revoked credential may still pass verification. This is an inherent trade-off in transparency log models — the window is bounded by checkpoint frequency and STALE_THRESHOLD, not unbounded. Deployments with strict revocation requirements should set short checkpoint intervals and tune STALE_THRESHOLD accordingly.
 
@@ -242,7 +242,7 @@ These are genuine gaps that should be addressed before production use. They are 
 
 **Origin must be unique per (algorithm, key) pair.** Two issuers sharing an origin with different algorithms will cause the verifier's checkpoint cache to return the wrong root hash. This constraint is documented but not enforced at issuer construction time — the issuer should validate that the origin encodes the algorithm or refuse to start if the origin appears to conflict.
 
-**SPEC.md does not describe Mode 2 tile addressing.** The spec covers the payload binary format and trust config schema but does not define the tile server API, tile addressing scheme, or tile verification algorithm needed to complete a Mode 2 deployment.
+**Mode 2 tile server reference implementation not yet built.** The tile server API and addressing scheme are now defined in SPEC.md §Verification Flow (Mode 2). Building a tile server and a scanner-side tile-fetching verifier are the remaining Mode 2 tasks.
 
 **Browser demo SDK bundle is not committed as a source artifact.** `browser-demo/deps/mta_qr_sdk.iife.js` is committed as a convenience snapshot but CI rebuilds it from `ts/sdk/src/browser-bundle.ts` on every push. The committed copy may be slightly stale between pushes; the CI-built version is authoritative.
 

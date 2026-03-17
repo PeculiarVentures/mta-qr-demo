@@ -1204,10 +1204,38 @@ not because inclusion proof verification is inherently weaker in Mode 2.
 
 6.  Compute entry_hash = SHA-256(0x00 || tbs).
 
-7.  Fetch the inclusion proof from the tile server. The tile addressing scheme
-    is not yet defined — see Open Questions (SPEC.md does not define the Mode 2
-    tile server API). Verify the two-phase tiled Merkle inclusion proof against
-    the checkpoint root hash from step 5.
+7.  Fetch the inclusion proof from the tile server.
+
+    The tile server root URL is the `checkpoint_url` with `/checkpoint` replaced
+    by `/tile` (or a separately configured `tile_url` in the trust config, if
+    provided). Tile addressing follows the two-level structure of the tiled tree:
+
+    **Inner tile** (batch root for the entry's batch):
+    ```
+    GET {tile_root}/inner/{batch_index}
+    ```
+    Response: a sequence of concatenated 32-byte SHA-256 leaf hashes for all
+    entries in that batch, in order. The batch index is `floor(entry_index / batch_size)`.
+
+    **Outer tile** (sibling hashes for the outer proof):
+    ```
+    GET {tile_root}/outer/{level}/{position}
+    ```
+    Response: a sequence of concatenated 32-byte SHA-256 node hashes at the
+    given level of the outer (parent) tree. Level 0 contains batch roots;
+    level k contains hashes of pairs from level k-1. Position is the tile index
+    within that level.
+
+    From the inner tile response, extract the entry leaf hash at
+    `inner_index = entry_index % batch_size` and reconstruct the batch root
+    (Phase A). From the outer tile(s), reconstruct the outer proof path from
+    the batch root to the parent tree root (Phase B). Verify the computed root
+    matches the checkpoint root hash from step 5 using the same two-phase
+    algorithm as Mode 1 steps 8a–8b.
+
+    The tile server MUST serve tiles over TLS. Tile responses are
+    content-addressed — a verifier MAY cache tiles by their URL since the
+    content is immutable once the tree advances past that position.
 
 8.  Check entry_index not revoked (§Revocation). Check expiry.
 
