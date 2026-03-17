@@ -19,7 +19,7 @@ import {
   noteKeyId, witnessKeyId, computeOriginId, pubKeyFromSeed, generateSeed,
 } from "./checkpoint.js";
 import {
-  encodePayload, WitnessCosig, MODE_CACHED, MODE_ONLINE,
+  encodePayload, WitnessCosig, MODE_EMBEDDED, MODE_CACHED, MODE_ONLINE,
 } from "./payload.js";
 
 export interface IssuerConfig {
@@ -38,7 +38,7 @@ export interface IssuerConfig {
    *       building a scanner that implements tile fetching independently.
    * Defaults to 1.
    */
-  mode?: 1 | 2;
+  mode?: 0 | 1 | 2;
   /**
    * Number of witness cosignatures to include.
    * Defaults to 2.
@@ -92,7 +92,7 @@ export class Issuer {
   private readonly origin:      string;
   private readonly originId:    bigint;
   private readonly schemaId:    number;
-  private readonly mode:        1 | 2;
+  private readonly mode:        0 | 1 | 2;
   private readonly batchSize:   number;
   private readonly signer:      Signer;
   private readonly witnesses:   WitnessKey[];
@@ -111,7 +111,7 @@ export class Issuer {
     this.origin    = config.origin;
     this.originId  = computeOriginId(config.origin);
     this.schemaId  = config.schemaId;
-    this.mode      = config.mode ?? 1;
+    this.mode      = (config.mode ?? 1) as 0 | 1 | 2;
     this.batchSize = config.batchSize ?? 16;
     this.signer    = signer;
 
@@ -160,7 +160,7 @@ export class Issuer {
     const tbs      = encodeTbs(entry);
     const idx      = this.appendEntry(tbs);
     await this.publishCheckpoint();
-    const payload  = this.buildPayload(idx, tbs);
+    const payload  = await this.buildPayload(idx, tbs);
 
     return {
       entryIndex:   idx,
@@ -248,7 +248,7 @@ export class Issuer {
   // --- private ---
 
   private totalEntries(): number {
-    return this.batches.reduce((n, b) => n + b.entries.length, 0) + this.currentBatch.length;
+    return this.batches.reduce((n: number, b: Batch) => n + b.entries.length, 0) + this.currentBatch.length;
   }
 
   private batchRoots(): Uint8Array[] {
@@ -334,9 +334,47 @@ ${cascB64}
     } catch { return 0n; }
   }
 
-  private buildPayload(entryIdx: number, tbs: Uint8Array): Uint8Array {
+  private async buildPayload(entryIdx: number, tbs: Uint8Array): Promise<Uint8Array> {
     const ckpt = this.latestCkpt!;
     
+
+    // Mode 0: embed proof + signed checkpoint (root hash, issuer sig, witness cosigs).
+    if (this.mode === 0) {
+      // Build the same two-phase tiled proof as Mode 1.
+      const batchIdx0 = Math.floor(entryIdx / this.batchSize);
+      const innerIdx0 = entryIdx % this.batchSize;
+      let batchHashes0: Uint8Array[], batchSz0: number;
+      if (batchIdx0 < this.batches.length) {
+        batchHashes0 = this.batches[batchIdx0].entries.map(e => e.hash);
+        batchSz0     = this.batches[batchIdx0].entries.length;
+      } else {
+        batchHashes0 = this.currentBatch.map(e => e.hash);
+        batchSz0     = this.currentBatch.length;
+      }
+      const innerProof0 = inclusionProof(batchHashes0, innerIdx0, batchSz0);
+      const allRoots0   = this.batchRoots();
+      const outerProof0 = inclusionProof(allRoots0, batchIdx0, allRoots0.length);
+      const allProof    = [...innerProof0, ...outerProof0];
+      const body        = checkpointBody(this.origin, ckpt.treeSize, ckpt.rootHash);
+      const issuerSig   = await this.signer.sign(body);
+      // Self-cosign with each witness key (same pattern as publishCheckpoint).
+      const cosigs: WitnessCosig[] = this.witnesses.map(w => {
+        const ts = BigInt(Math.floor(Date.now() / 1000));
+        const sig = signCosignature(body, ts, w.seed);
+        return { keyId: w.keyId, timestamp: ts, signature: sig };
+      });
+      return encodePayload({
+        version: 0x01, mode: MODE_EMBEDDED, sigAlg: this.sigAlg,
+        dualSig: false, selfDescrib: true,
+        originId: this.originId, treeSize: BigInt(ckpt.treeSize),
+        entryIndex: BigInt(entryIdx), origin: this.origin,
+        proofHashes: allProof, innerProofCount: innerProof0.length,
+        tbs,
+        rootHash: ckpt.rootHash,
+        issuerSig,
+        cosigs,
+      });
+    }
 
     // Mode 2: no proof embedded — verifier fetches proof at scan time.
     if (this.mode === 2) {

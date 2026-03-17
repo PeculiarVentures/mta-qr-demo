@@ -177,6 +177,7 @@ type IssueRequest struct {
 	SchemaID   uint64         `json:"schema_id"`
 	TTLSeconds uint64         `json:"ttl_seconds"`
 	Claims     map[string]any `json:"claims"`
+	Mode       uint8          `json:"mode"` // 0=embedded, 1=cached(default), 2=online
 }
 
 // IssueResponse is returned by POST /issue.
@@ -216,7 +217,7 @@ func handleIssue(w http.ResponseWriter, r *http.Request) {
 	now := uint64(time.Now().Unix())
 	expiry := now + req.TTLSeconds
 
-	idx, payloadBytes, err := issuerLog.AppendDataAssertion(now, expiry, req.SchemaID, req.Claims)
+	idx, payloadBytes, err := issuerLog.AppendDataAssertion(now, expiry, req.SchemaID, req.Claims, req.Mode)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("issue error: %v", err), http.StatusInternalServerError)
 		return

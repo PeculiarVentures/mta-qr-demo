@@ -163,10 +163,33 @@ impl Verifier {
         if p.entry_index == 0 { fail!("entry index", "entry_index=0 is reserved for null_entry"); }
         add!(true, "entry index", format!("entry_index={} valid", p.entry_index));
 
-        // 3. Mode check — reject Mode 0 before any network work.
+        // 3. Mode 0 — verify the embedded checkpoint directly from payload bytes.
         if p.mode == 0 {
-            fail!("mode check",
-                "Mode 0 (embedded checkpoint) is not implemented by this verifier — use Mode 1");
+            // Null-entry check applies to all modes.
+            if p.entry_index == 0 { fail!("entry index", "entry_index=0 is reserved for null_entry"); }
+            add!(true, "entry index", format!("entry_index={} valid", p.entry_index));
+            // Trust anchor lookup.
+            let trust = match self.anchors.get(&p.origin_id) {
+                Some(t) => t,
+                None => fail!("trust anchor", format!(
+                    "no anchor for origin_id 0x{:016x} — call add_anchor() first", p.origin_id)),
+            };
+            add!(true, "trust anchor", format!("found: {:?}", trust.origin));
+            // Algorithm binding.
+            if p.sig_alg != trust.sig_alg {
+                fail!("algorithm binding", format!(
+                    "payload sig_alg={} but trust config requires {}", p.sig_alg, trust.sig_alg));
+            }
+            add!(true, "algorithm binding", format!("sig_alg={} matches", p.sig_alg));
+            // Verify embedded checkpoint.
+            let root_hash = match self.verify_embedded_checkpoint(&p, trust) {
+                Ok(rh) => { add!(true, "embedded checkpoint",
+                    format!("issuer sig ✓ · {}/{} witnesses ✓", trust.witness_quorum, trust.witness_quorum));
+                    rh },
+                Err(e) => fail!("embedded checkpoint", e.to_string()),
+            };
+            // Continue with inclusion proof and claims checks.
+            return self.run_after_root_hash(&p, &root_hash, trust, steps).await;
         }
 
         // 4. Trust anchor lookup — multi-anchor routing by origin_id.
@@ -225,6 +248,57 @@ impl Verifier {
             }
         };
 
+        return self.run_after_root_hash(&p, &root_hash, trust, steps).await;
+    }
+
+    /// Verify a Mode 0 embedded checkpoint and return the root hash.
+    fn verify_embedded_checkpoint(&self, p: &DecodedPayload, trust: &TrustConfig) -> Result<[u8; 32]> {
+        let root_hash = p.root_hash.ok_or_else(|| anyhow!("root_hash missing in Mode 0 payload"))?;
+        let issuer_sig = p.issuer_sig.as_ref().ok_or_else(|| anyhow!("issuer_sig missing"))?;
+        let body = checkpoint_body(&trust.origin, p.tree_size, &root_hash);
+        if !verify(trust.sig_alg, &body, issuer_sig, &trust.issuer_pub_key) {
+            return Err(anyhow!("{} issuer signature invalid", trust.issuer_key_name));
+        }
+        let mut seen: std::collections::HashSet<[u8; 4]> = Default::default();
+        let mut verified = 0usize;
+        for cosig in &p.cosigs {
+            if !seen.insert(cosig.key_id) {
+                return Err(anyhow!("duplicate witness key_id {:02x?}", cosig.key_id));
+            }
+            let msg = cosignature_message(&body, cosig.timestamp);
+            for w in &trust.witnesses {
+                if w.key_id != cosig.key_id { continue; }
+                if verify(ALG_ED25519, &msg, &cosig.signature, &w.pub_key) {
+                    verified += 1; break;
+                }
+            }
+        }
+        if verified < trust.witness_quorum {
+            return Err(anyhow!("witness quorum not met: {}/{}", verified, trust.witness_quorum));
+        }
+        Ok(root_hash)
+    }
+
+    /// Run entry-hash, inclusion-proof, TBS, revocation and expiry checks.
+    async fn run_after_root_hash(
+        &self, p: &DecodedPayload, root_hash: &[u8],
+        trust: &TrustConfig, mut steps: Vec<VerifyStep>,
+    ) -> TraceResult {
+        macro_rules! add {
+            ($ok:expr, $step:expr, $detail:expr) => {
+                steps.push(VerifyStep { name: $step.into(), ok: $ok, detail: $detail.into() });
+            };
+        }
+        macro_rules! fail {
+            ($step:expr, $reason:expr) => {{
+                add!(false, $step, $reason);
+                return TraceResult {
+                    ok: None,
+                    fail: Some(VerifyFail { failed_step: $step.into(), reason: $reason.into() }),
+                    steps,
+                };
+            }};
+        }
         // 7. Entry hash
         let e_hash = hash_leaf(&p.tbs);
         add!(true, "entry hash", format!("SHA-256(0x00 || tbs) = {}…", hex::encode(&e_hash[..8])));
@@ -315,6 +389,7 @@ impl Verifier {
             fail: None,
             steps,
         }
+    
     }
 
     async fn fetch_and_verify_checkpoint(&self, required_size: u64, trust: &TrustConfig) -> Result<(Vec<u8>, u64)> {
@@ -550,7 +625,14 @@ impl Verifier {
 
 // --- payload decoding ---
 
-#[cfg_attr(test, derive(Debug))]
+/// A witness cosignature embedded in a Mode 0 payload.
+#[derive(Debug, Clone)]
+pub(crate) struct WitnessCosig {
+    pub(crate) key_id:    [u8; 4],
+    pub(crate) timestamp: u64,
+    pub(crate) signature: [u8; 64],
+}
+
 pub(crate) struct DecodedPayload {
     pub(crate) mode:         u8,
     pub(crate) sig_alg:      u8,
@@ -561,6 +643,10 @@ pub(crate) struct DecodedPayload {
     pub(crate) proof_hashes: Vec<Vec<u8>>,
     pub(crate) inner_count:  u8,
     pub(crate) tbs:          Vec<u8>,
+    // Mode 0 only — embedded checkpoint fields.
+    pub(crate) root_hash:    Option<[u8; 32]>,
+    pub(crate) issuer_sig:   Option<Vec<u8>>,
+    pub(crate) cosigs:       Vec<WitnessCosig>,
 }
 
 pub(crate) fn decode_payload(data: &[u8]) -> Result<DecodedPayload> {
@@ -612,11 +698,33 @@ pub(crate) fn decode_payload(data: &[u8]) -> Result<DecodedPayload> {
     let tbs_len = read_u16(&mut pos)? as usize;
     let tbs     = read_bytes(&mut pos, tbs_len)?;
 
+    // Mode 0: parse embedded checkpoint fields.
+    let (root_hash, issuer_sig, cosigs) = if mode == 0 {
+        let rh_bytes = read_bytes(&mut pos, 32)?;
+        let mut rh = [0u8; 32]; rh.copy_from_slice(&rh_bytes);
+        let sig_len = read_u16(&mut pos)? as usize;
+        let isig    = read_bytes(&mut pos, sig_len)?;
+        let cosig_count = read_byte(&mut pos)? as usize;
+        let mut cosigs = Vec::with_capacity(cosig_count);
+        for _ in 0..cosig_count {
+            let kid_bytes = read_bytes(&mut pos, 4)?;
+            let mut kid = [0u8; 4]; kid.copy_from_slice(&kid_bytes);
+            let ts  = read_u64(&mut pos)?;
+            let sig_bytes = read_bytes(&mut pos, 64)?;
+            let mut sig = [0u8; 64]; sig.copy_from_slice(&sig_bytes);
+            cosigs.push(WitnessCosig { key_id: kid, timestamp: ts, signature: sig });
+        }
+        (Some(rh), Some(isig), cosigs)
+    } else {
+        (None, None, vec![])
+    };
+
     if pos != data.len() {
         return Err(anyhow!("payload: {} trailing bytes after TBS", data.len() - pos));
     }
 
-    Ok(DecodedPayload { mode, sig_alg, origin_id, tree_size, entry_index, origin, proof_hashes, inner_count, tbs })
+    Ok(DecodedPayload { mode, sig_alg, origin_id, tree_size, entry_index, origin,
+                        proof_hashes, inner_count, tbs, root_hash, issuer_sig, cosigs })
 }
 
 // --- CBOR TBS decoding ---

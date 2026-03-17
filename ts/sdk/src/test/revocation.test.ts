@@ -154,9 +154,63 @@ describe("mode 0 rejection", () => {
     const result = await v.verify(payload);
     assert.equal(result.valid, false, "mode=0 must be rejected");
     const msg = JSON.stringify(result);
+    // Mode 0 is now implemented — a crafted payload with placeholder
+    // signatures should fail at embedded checkpoint verification.
     assert.ok(
-      msg.toLowerCase().includes("mode 0") || msg.includes("not implemented"),
-      `expected mode=0 rejection message, got: ${msg}`
+      msg.includes("embedded checkpoint") || msg.includes("issuer signature"),
+      `expected embedded checkpoint failure, got: ${msg}`
     );
+  });
+});
+
+// --- Mode 0 round-trip ---
+
+describe("mode 0", () => {
+  it("issues and verifies a Mode 0 payload without network access", async () => {
+    const signer = localEd25519(SEED);
+    const issuer = new Issuer(
+      { origin: "test.mode0/v1", schemaId: 1, mode: 0 },
+      signer,
+    );
+    await issuer.init();
+
+    const qr = await issuer.issue({ subject: "mode0-test" }, 3600);
+    assert.ok(qr.payload.length > 0, "payload must be non-empty");
+
+    const trust = parseTrustConfig(
+      issuer.trustConfigJson("http://localhost:0/checkpoint")
+    );
+    const revArt = issuer.revocationArtifact() ?? "";
+
+    // No noteProvider needed for Mode 0 — checkpoint is embedded in payload.
+    const v = new Verifier(undefined, () => revArt).addAnchor(trust);
+    const result = await v.verify(new Uint8Array(qr.payload));
+
+    assert.equal(result.valid, true, `Mode 0 must verify: ${JSON.stringify(result)}`);
+    assert.equal(result.mode, 0, "mode must be 0 in result");
+    assert.deepEqual(result.claims, { subject: "mode0-test" });
+  });
+
+  it("Mode 0 payload rejects tampered root_hash", async () => {
+    const signer = localEd25519(SEED);
+    const issuer = new Issuer(
+      { origin: "test.mode0-tamper/v1", schemaId: 1, mode: 0 },
+      signer,
+    );
+    await issuer.init();
+    const qr = await issuer.issue({ subject: "tamper-test" }, 3600);
+
+    // Flip one byte in the root_hash region (after TBS, at the start of embedded checkpoint).
+    const tampered = new Uint8Array(qr.payload);
+    // root_hash starts after the fixed header + proofs + tbs.
+    // Just flip a byte near the end — if it's in root_hash, sig or cosig it will fail.
+    tampered[tampered.length - 10] ^= 0xff;
+
+    const trust = parseTrustConfig(
+      issuer.trustConfigJson("http://localhost:0/checkpoint")
+    );
+    const v = new Verifier().addAnchor(trust);
+    const result = await v.verify(tampered);
+    assert.equal(result.valid, false, "tampered Mode 0 payload must be rejected");
   });
 });

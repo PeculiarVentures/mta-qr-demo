@@ -442,10 +442,51 @@ mod revocation_tests {
         payload.push(0x01); // minimal TBS (data assertion type byte)
 
         let result = v.verify(&payload).await;
-        assert!(result.is_err(), "mode=0 must be rejected");
+        assert!(result.is_err(), "mode=0 with bad/missing embedded checkpoint must be rejected");
+        // Mode 0 is now implemented — a crafted payload missing embedded fields
+        // fails at decode time or at signature verification.
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("Mode 0") || msg.contains("not implemented"),
-            "expected mode=0 rejection, got: {msg}");
+        assert!(
+            msg.contains("embedded checkpoint") || msg.contains("issuer signature")
+            || msg.contains("malformed") || msg.contains("root_hash") || msg.contains("trailing"),
+            "expected decode/checkpoint failure, got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn mode0_round_trip() {
+        use crate::issuer::{Issuer, IssuerConfig};
+        use crate::verifier::Verifier;
+        use crate::trust::TrustConfig;
+        use crate::signers::local::LocalSigner;
+        use std::time::Duration;
+
+        let signer = LocalSigner::ed25519(&SEED).unwrap();
+        let cfg = IssuerConfig {
+            origin:        "test.mode0.roundtrip/v1".into(),
+            schema_id:     1,
+            mode:          Some(0), // Mode 0: embedded checkpoint
+            batch_size:    None,
+            witness_count: Some(1),
+        };
+        let issuer = Issuer::new(cfg, signer);
+        issuer.init().await.unwrap();
+
+        let qr = issuer.issue([("subject", "mode0-test")], Duration::from_secs(3600)).await.unwrap();
+
+        // Build verifier — no noteProvider needed for Mode 0, checkpoint is embedded.
+        let tc_json = issuer.trust_config_json("http://localhost:0/checkpoint").await.unwrap();
+        let trust   = TrustConfig::parse_str(&tc_json).unwrap();
+        let revoc   = issuer.revocation_artifact().await.unwrap_or_default();
+        let mut v = Verifier::with_revocation_provider(
+            Box::new(|_| Err(anyhow::anyhow!("no checkpoint fetch in Mode 0 test"))),
+            Box::new(move |_| Ok(revoc.clone())),
+        );
+        v.add_anchor(trust).unwrap();
+
+        let result = v.verify(&qr.payload).await;
+        assert!(result.is_ok(), "Mode 0 payload must verify: {:?}", result.err());
+        let ok = result.unwrap();
+        assert_eq!(ok.mode, 0, "result mode must be 0");
     }
 
     #[tokio::test]

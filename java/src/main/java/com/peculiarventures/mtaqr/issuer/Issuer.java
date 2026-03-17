@@ -78,6 +78,7 @@ public final class Issuer {
 
     private static final byte ENTRY_TYPE_NULL = 0x00;
     private static final byte ENTRY_TYPE_DATA = 0x01;
+    private static final int  MODE_EMBEDDED   = 0;
     private static final int  MODE_CACHED     = 1;
     private static final int  MODE_ONLINE     = 2;
 
@@ -114,7 +115,7 @@ public final class Issuer {
     private Issuer(String origin, long schemaId, int mode, int batchSize, int witnessCount, Signer signer) {
         this.origin       = origin;
         this.schemaId     = schemaId;
-        this.mode         = (mode == 2) ? 2 : 1;
+        this.mode         = (mode == 0) ? 0 : (mode == 2) ? 2 : 1;
         this.batchSize    = batchSize;
         this.witnessCount = witnessCount;
         this.signer       = signer;
@@ -289,6 +290,52 @@ public final class Issuer {
 
     private byte[] buildPayload(long globalIdx, byte[] tbs) {
         SignedCheckpoint ckpt = latestCkpt;
+
+        // Mode 0: embed proof + signed checkpoint.
+        if (mode == MODE_EMBEDDED) {
+            int batchIdx0 = (int)(globalIdx / batchSize);
+            int innerIdx0 = (int)(globalIdx % batchSize);
+            List<byte[]> batchHashes0;
+            int batchSz0;
+            synchronized (lock) {
+                if (batchIdx0 < batches.size()) {
+                    List<LogEntry> b = batches.get(batchIdx0).entries();
+                    batchHashes0 = b.stream().map(LogEntry::entryHash).toList();
+                    batchSz0     = b.size();
+                } else {
+                    batchHashes0 = currentBatch.stream().map(LogEntry::entryHash).toList();
+                    batchSz0     = currentBatch.size();
+                }
+            }
+            List<byte[]> innerProof0 = inclusionProof(batchHashes0, innerIdx0, batchSz0);
+            List<byte[]> allRoots0   = batchRoots();
+            List<byte[]> outerProof0 = inclusionProof(allRoots0, batchIdx0, allRoots0.size());
+            List<byte[]> allProof0   = new ArrayList<>(innerProof0);
+            allProof0.addAll(outerProof0);
+
+            // Use the issuer sig and witness cosigs from the stored checkpoint.
+            byte[] payload = encodePayload(globalIdx, ckpt.treeSize(), allProof0,
+                                           innerProof0.size(), tbs, MODE_EMBEDDED);
+            // Append embedded checkpoint fields.
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            try { out.write(payload); } catch (Exception ignored) {}
+            // root_hash (32 bytes)
+            out.writeBytes(ckpt.rootHash());
+            // issuer_sig_len (2 bytes big-endian) + issuer_sig
+            int slen = ckpt.issuerSig().length;
+            out.write((slen >> 8) & 0xff); out.write(slen & 0xff);
+            out.writeBytes(ckpt.issuerSig());
+            // witness_count (1 byte) + cosigs
+            List<WitnessCosig> cosigs0 = ckpt.cosigs();
+            out.write(cosigs0.size() & 0xff);
+            for (WitnessCosig c : cosigs0) {
+                out.writeBytes(c.keyId());
+                long ts0 = c.timestamp();
+                for (int bi = 7; bi >= 0; bi--) out.write((int)((ts0 >> (bi*8)) & 0xff));
+                out.writeBytes(c.signature());
+            }
+            return out.toByteArray();
+        }
 
         // Mode 2: no proof embedded.
         if (mode == MODE_ONLINE)

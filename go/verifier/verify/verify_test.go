@@ -1,6 +1,8 @@
 package verify_test
 
 import (
+	"encoding/hex"
+	"strconv"
 	"testing"
 	"time"
 
@@ -8,6 +10,7 @@ import (
 	"github.com/mta-qr/demo/shared/merkle"
 	"github.com/mta-qr/demo/shared/payload"
 	"github.com/mta-qr/demo/shared/signing"
+	"github.com/mta-qr/demo/issuer/log"
 	"github.com/mta-qr/demo/verifier/verify"
 )
 
@@ -219,35 +222,61 @@ func TestRejectExpiredAssertion(t *testing.T) {
 	}
 }
 
-func TestRejectMode0(t *testing.T) {
-	v, anchor, _ := ed25519Anchor(t, "example.com/verify-test/v1")
+func TestMode0RoundTrip(t *testing.T) {
+	// Issue a real Mode 0 payload using the Log (which generates genuine
+	// issuer signatures and self-witness cosignatures) then verify it
+	// without any network access.
+	origin := "example.com/mode0-test/v1"
+	seed := make([]byte, 32)
+	for i := range seed { seed[i] = 0x55 }
+	issuerKey, err := signing.Ed25519FromSeed(seed)
+	if err != nil { t.Fatalf("signer: %v", err) }
 
-	// Build a Mode 0 payload (embedded checkpoint). The verifier must reject
-	// it with a clear "not implemented" error rather than silently falling
-	// through to the Mode 1 network path.
-	realTBS, _ := mtacbor.EncodeDataAssertion(
-		uint64(time.Now().Unix())-60, uint64(time.Now().Unix())+3600, 1, map[string]any{"k": "v"})
-	nullHash := merkle.EntryHash([]byte{0x00})
-	realHash := merkle.EntryHash(realTBS)
-	leaves := [][]byte{nullHash, realHash}
-	root, _ := merkle.Root(leaves)
-	proof, _ := merkle.InclusionProof(leaves, 1, 2)
+	l, err := log.New(origin, issuerKey)
+	if err != nil { t.Fatalf("log.New: %v", err) }
 
-	p := &payload.Payload{
-		Version: 0x01, Mode: payload.ModeEmbedded, // Mode 0
-		SigAlg: anchor.SigAlg, OriginID: anchor.OriginID,
-		TreeSize: 2, EntryIndex: 1,
-		ProofHashes: proof, InnerProofCount: uint8(len(proof)), TBS: realTBS,
-		RootHash: root, IssuerSig: make([]byte, 64), // placeholder sigs
+	now := uint64(time.Now().Unix())
+	_, payloadBytes, err := l.AppendDataAssertion(now-60, now+3600, 1, map[string]any{"k": "v"}, 0)
+	if err != nil { t.Fatalf("AppendDataAssertion: %v", err) }
+
+	// Build trust anchor from the log's trust config.
+	tc := l.TrustConfig()
+	anchor := trustAnchorFromConfig(t, tc)
+
+	v := verify.New()
+	if err := v.AddAnchor(anchor); err != nil { t.Fatalf("AddAnchor: %v", err) }
+
+	result := v.Verify(payloadBytes)
+	if !result.Valid {
+		t.Errorf("expected Mode 0 payload to verify, got invalid: %v", lastFailStep(result))
 	}
-	b, _ := payload.Encode(p)
-
-	result := v.Verify(b)
-	if result.Valid {
-		t.Error("expected rejection of Mode 0 (not implemented), got valid")
+	// Confirm the embedded checkpoint step fired (not a cache hit).
+	if !stepsContain(result, "Embedded checkpoint") {
+		t.Errorf("expected 'Embedded checkpoint' step; got: %v", stepNames(result))
 	}
-	if !stepsContain(result, "Mode check") {
-		t.Errorf("expected 'Mode check' step in trace; steps: %v", stepNames(result))
+}
+
+// trustAnchorFromConfig converts an issuer TrustConfig to a verify.TrustAnchor.
+func trustAnchorFromConfig(t *testing.T, tc log.TrustConfig) *verify.TrustAnchor {
+	t.Helper()
+	issuerPub, err := hex.DecodeString(tc.IssuerPubKey)
+	if err != nil { t.Fatalf("decode issuer pub: %v", err) }
+	originID, err := strconv.ParseUint(tc.OriginID, 16, 64)
+	if err != nil { t.Fatalf("parse origin_id: %v", err) }
+	witnesses := make([]verify.WitnessEntry, len(tc.Witnesses))
+	for i, w := range tc.Witnesses {
+		pub, _ := hex.DecodeString(w.PubKey)
+		kidB, _ := hex.DecodeString(w.KeyID)
+		var kid [4]byte; copy(kid[:], kidB)
+		witnesses[i] = verify.WitnessEntry{Name: w.Name, KeyID: kid, PubKey: pub}
+	}
+	batchSize := tc.BatchSize
+	if batchSize <= 0 { batchSize = 16 }
+	return &verify.TrustAnchor{
+		Origin: tc.Origin, OriginID: originID,
+		IssuerPubKey: issuerPub, IssuerKeyName: tc.IssuerKeyName,
+		SigAlg: tc.SigAlg, WitnessQuorum: tc.WitnessQuorum,
+		Witnesses: witnesses, BatchSize: batchSize,
 	}
 }
 

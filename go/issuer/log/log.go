@@ -132,8 +132,12 @@ func (l *Log) appendNullEntry() error {
 }
 
 // AppendDataAssertion encodes and appends a new DataAssertionLogEntry.
-// Returns the global entry index and a Mode 1 payload binary.
-func (l *Log) AppendDataAssertion(issuanceTime, expiryTime, schemaID uint64, claims interface{}) (uint64, []byte, error) {
+// AppendDataAssertion appends a data assertion entry and returns the global
+// entry index and a payload binary. mode selects the payload mode:
+//   0 = Mode 0 (embedded checkpoint — fully offline)
+//   1 = Mode 1 (cached checkpoint — default)
+//   2 = Mode 2 (online proof — smallest payload)
+func (l *Log) AppendDataAssertion(issuanceTime, expiryTime, schemaID uint64, claims interface{}, mode uint8) (uint64, []byte, error) {
 	tbs, err := mtacbor.EncodeDataAssertion(issuanceTime, expiryTime, schemaID, claims)
 	if err != nil {
 		return 0, nil, fmt.Errorf("log: encode data assertion: %w", err)
@@ -160,9 +164,17 @@ func (l *Log) AppendDataAssertion(issuanceTime, expiryTime, schemaID uint64, cla
 	if err := l.publishCheckpointLocked(); err != nil {
 		return 0, nil, fmt.Errorf("log: publish checkpoint: %w", err)
 	}
-	qrBytes, err := l.buildMode1PayloadLocked(globalIdx, tbs)
+	var qrBytes []byte
+	switch mode {
+	case 0:
+		qrBytes, err = l.buildMode0PayloadLocked(globalIdx, tbs)
+	case 2:
+		qrBytes, err = l.buildMode2PayloadLocked(globalIdx, tbs)
+	default:
+		qrBytes, err = l.buildMode1PayloadLocked(globalIdx, tbs)
+	}
 	if err != nil {
-		return 0, nil, fmt.Errorf("log: build payload: %w", err)
+		return 0, nil, fmt.Errorf("log: build payload (mode %d): %w", mode, err)
 	}
 	return globalIdx, qrBytes, nil
 }
@@ -349,6 +361,75 @@ func (l *Log) buildMode1PayloadLocked(globalIdx uint64, tbs []byte) ([]byte, err
 		ProofHashes:     allProof,
 		InnerProofCount: uint8(len(innerProof)),
 		TBS:             tbs,
+	}
+	return payload.Encode(p)
+}
+
+// buildMode2PayloadLocked builds a Mode 2 (online reference) payload.
+// No proof hashes are embedded; the verifier fetches the inclusion proof
+// from a tile server at scan time.
+func (l *Log) buildMode2PayloadLocked(globalIdx uint64, tbs []byte) ([]byte, error) {
+	ckpt := l.latestCkpt
+	if ckpt == nil { return nil, fmt.Errorf("no checkpoint available") }
+	p := &payload.Payload{
+		Version: 0x01, Mode: payload.ModeOnline, SigAlg: l.issuer.SigAlg(),
+		DualSig: false, SelfDescrib: true,
+		OriginID: l.originID, TreeSize: ckpt.TreeSize,
+		EntryIndex: globalIdx, Origin: l.origin,
+		ProofHashes: nil, InnerProofCount: 0,
+		TBS: tbs,
+	}
+	return payload.Encode(p)
+}
+
+// buildMode0PayloadLocked builds a fully self-contained Mode 0 payload.
+// It embeds the two-phase inclusion proof plus the signed checkpoint
+// (root hash, issuer signature, and all witness cosignatures) so the
+// verifier needs no network access at scan time.
+// Must be called with l.mu held (read or write).
+func (l *Log) buildMode0PayloadLocked(globalIdx uint64, tbs []byte) ([]byte, error) {
+	ckpt := l.latestCkpt
+	if ckpt == nil {
+		return nil, fmt.Errorf("no checkpoint available")
+	}
+
+	batchIdx := int(globalIdx) / BatchSize
+	innerIdx := int(globalIdx) % BatchSize
+
+	// Collect batch entry hashes.
+	var batchEntryHashes [][]byte
+	var batchSize int
+	if batchIdx < len(l.batches) {
+		b := l.batches[batchIdx]
+		for _, e := range b.Entries { batchEntryHashes = append(batchEntryHashes, e.EntryHash) }
+		batchSize = len(b.Entries)
+	} else {
+		for _, e := range l.currentBatch { batchEntryHashes = append(batchEntryHashes, e.EntryHash) }
+		batchSize = len(l.currentBatch)
+	}
+
+	innerProof, err := merkle.InclusionProof(batchEntryHashes, innerIdx, batchSize)
+	if err != nil { return nil, fmt.Errorf("inner inclusion proof: %w", err) }
+
+	bRoots, err := l.batchRoots()
+	if err != nil { return nil, fmt.Errorf("batch roots: %w", err) }
+
+	outerProof, err := merkle.InclusionProof(bRoots, batchIdx, len(bRoots))
+	if err != nil { return nil, fmt.Errorf("outer inclusion proof: %w", err) }
+
+	allProof := append(innerProof, outerProof...)
+
+	p := &payload.Payload{
+		Version: 0x01, Mode: payload.ModeEmbedded, SigAlg: l.issuer.SigAlg(),
+		DualSig: false, SelfDescrib: true,
+		OriginID: l.originID, TreeSize: ckpt.TreeSize,
+		EntryIndex: globalIdx, Origin: l.origin,
+		ProofHashes:     allProof,
+		InnerProofCount: uint8(len(innerProof)),
+		TBS:             tbs,
+		RootHash:        ckpt.RootHash,
+		IssuerSig:       ckpt.IssuerSig,
+		Cosigs:          ckpt.Cosigs,
 	}
 	return payload.Encode(p)
 }

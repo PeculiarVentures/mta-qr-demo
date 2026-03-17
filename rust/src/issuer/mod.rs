@@ -55,6 +55,7 @@ pub struct IssuedQR {
 
 const ENTRY_TYPE_NULL: u8 = 0x00;
 const ENTRY_TYPE_DATA: u8 = 0x01;
+const MODE_EMBEDDED:   u8 = 0;
 const MODE_CACHED:     u8 = 1;
 const MODE_ONLINE:     u8 = 2;
 
@@ -175,7 +176,7 @@ impl Issuer {
 
         let state = self.state.lock().await;
         let ckpt  = state.latest_ckpt.as_ref().unwrap();
-        let mode    = self.cfg.mode.unwrap_or(1).clamp(1, 2);
+        let mode    = self.cfg.mode.unwrap_or(1).clamp(0, 2);
         let payload = build_payload(&state, idx, &tbs, ckpt, &self.cfg.origin, self.batch_size, self.signer.alg(), mode)?;
         let payload_base64url = B64URL.encode(&payload);
 
@@ -392,6 +393,53 @@ fn build_payload(
     sig_alg: u8,
     mode: u8,
 ) -> Result<Vec<u8>> {
+    // Mode 0: embed proof + signed checkpoint (root_hash, issuer_sig, cosigs).
+    if mode == MODE_EMBEDDED {
+        let batch_idx = global_idx as usize / batch_size;
+        let inner_idx = global_idx as usize % batch_size;
+        let (batch_hashes, batch_sz) = if batch_idx < state.batches.len() {
+            let b = &state.batches[batch_idx];
+            (b.entries.iter().map(|e| e.entry_hash.clone()).collect::<Vec<_>>(), b.entries.len())
+        } else {
+            (state.current_batch.iter().map(|e| e.entry_hash.clone()).collect::<Vec<_>>(),
+             state.current_batch.len())
+        };
+        let inner_proof = inclusion_proof(&batch_hashes, inner_idx, batch_sz)?;
+        let all_roots   = batch_roots(state);
+        let outer_proof = inclusion_proof(&all_roots, batch_idx, all_roots.len())?;
+        let proof_hashes: Vec<_> = inner_proof.iter().chain(outer_proof.iter()).cloned().collect();
+        let inner_count = inner_proof.len() as u8;
+
+        let mut rh = [0u8; 32];
+        rh.copy_from_slice(&ckpt.root_hash);
+        let issuer_sig = ckpt.issuer_sig.clone();
+        let cosigs: Vec<(Vec<u8>, u64, Vec<u8>)> = state.witnesses.iter()
+            .map(|w| {
+                let ts  = unix_now();
+                let msg = cosignature_message(&ckpt.body, ts);
+                use ed25519_dalek::Signer as DalekSigner;
+                let sig: ed25519_dalek::Signature = w.signing.sign(&msg);
+                (w.key_id.to_vec(), ts, sig.to_bytes().to_vec())
+            }).collect();
+
+        let mut buf = encode_payload(
+            global_idx, ckpt.tree_size, state.origin_id,
+            origin, &proof_hashes, inner_count, tbs, sig_alg, MODE_EMBEDDED,
+        );
+        // Append embedded checkpoint: root_hash(32) + issuer_sig_len(2) +
+        // issuer_sig + witness_count(1) + cosigs[](key_id(4)+ts(8)+sig(64))
+        buf.extend_from_slice(&rh);
+        buf.extend_from_slice(&(issuer_sig.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&issuer_sig);
+        buf.push(cosigs.len() as u8);
+        for (kid, ts, sig) in &cosigs {
+            buf.extend_from_slice(kid);
+            buf.extend_from_slice(&ts.to_be_bytes());
+            buf.extend_from_slice(sig);
+        }
+        return Ok(buf);
+    }
+
     // Mode 2: no proof embedded.
     if mode == MODE_ONLINE {
         return Ok(encode_payload(
