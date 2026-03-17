@@ -42,10 +42,9 @@ public class SmokeTest {
         String note = issuer.checkpointNote();
         String revArtifact = issuer.revocationArtifact();
         Verifier v = Verifier.builder()
-            .trust(trust)
             .noteProvider(url -> CompletableFuture.completedFuture(note))
             .revocationProvider(url -> CompletableFuture.completedFuture(revArtifact))
-            .build();
+            .build().addAnchor(trust);
 
         var result = v.verify(qr.payload()).get();
         assertEquals(qr.entryIndex(), result.entryIndex(), label + ": entry index mismatch");
@@ -65,10 +64,9 @@ public class SmokeTest {
         String note = issuer.checkpointNote();
         String revArtifact = issuer.revocationArtifact();
         Verifier v = Verifier.builder()
-            .trust(trust)
             .noteProvider(url -> CompletableFuture.completedFuture(note))
             .revocationProvider(url -> CompletableFuture.completedFuture(revArtifact))
-            .build();
+            .build().addAnchor(trust);
 
         assertThrows(Exception.class, () -> v.verify(tampered).get(), label + ": tampered payload should fail");
     }

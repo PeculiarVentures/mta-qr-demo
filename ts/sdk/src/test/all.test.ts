@@ -33,7 +33,7 @@ async function roundTrip(label: string, signer: Signer) {
   const trust    = parseTrustConfig(issuer.trustConfigJson("http://localhost:0/checkpoint"));
   const note     = issuer.checkpointNote();
   const revArt = issuer.revocationArtifact() ?? "";
-  const verifier = new Verifier(trust, () => note, () => revArt);
+  const verifier = new Verifier(() => note, () => revArt).addAnchor(trust);
 
   try {
     const result = await verifier.verify(new Uint8Array(qr.payload));
@@ -55,7 +55,7 @@ async function rejectTampered(label: string, signer: Signer) {
   const trust    = parseTrustConfig(issuer.trustConfigJson("http://localhost:0/checkpoint"));
   const note     = issuer.checkpointNote();
   const revArt2 = issuer.revocationArtifact() ?? "";
-  const verifier = new Verifier(trust, () => note, () => revArt2);
+  const verifier = new Verifier(() => note, () => revArt2).addAnchor(trust);
 
   const result = await verifier.verify(tampered);
   assert(!result.valid, `${label}: reject tampered payload`);

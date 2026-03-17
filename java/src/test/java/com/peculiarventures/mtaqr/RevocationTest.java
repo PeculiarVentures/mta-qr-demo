@@ -58,10 +58,9 @@ class RevocationTest {
         // latest note is valid only when all payloads were issued under the same
         // checkpoint. Use noteCache to serve the note that was current at issue time.
         return Verifier.builder()
-            .trust(f.trust())
             .noteProvider(url  -> CompletableFuture.completedFuture(f.issuer().checkpointNote()))
             .revocationProvider(url -> CompletableFuture.completedFuture(f.issuer().revocationArtifact()))
-            .build();
+            .build().addAnchor(f.trust());
     }
 
     /**
@@ -88,7 +87,6 @@ class RevocationTest {
      */
     private Verifier makeVerifierWithNotes(Fixture f, java.util.NavigableMap<Long, String> notesByTreeSize) {
         return Verifier.builder()
-            .trust(f.trust())
             .noteProvider(url -> {
                 // The verifier validates note.tree_size >= payload.tree_size.
                 // We must return the note captured at exactly payload.tree_size so the
@@ -100,7 +98,7 @@ class RevocationTest {
                 return CompletableFuture.completedFuture(note);
             })
             .revocationProvider(url -> CompletableFuture.completedFuture(f.issuer().revocationArtifact()))
-            .build();
+            .build().addAnchor(f.trust());
     }
 
     // ── tests ─────────────────────────────────────────────────────────────
@@ -181,10 +179,9 @@ class RevocationTest {
     private Verifier verifierForEntry(Fixture f, IssuedWithNote iw) {
         String capturedNote = iw.note();
         return Verifier.builder()
-            .trust(f.trust())
             .noteProvider(url -> CompletableFuture.completedFuture(capturedNote))
             .revocationProvider(url -> CompletableFuture.completedFuture(f.issuer().revocationArtifact()))
-            .build();
+            .build().addAnchor(f.trust());
     }
 
     @Test

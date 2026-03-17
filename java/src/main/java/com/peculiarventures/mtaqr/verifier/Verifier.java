@@ -42,7 +42,7 @@ import java.util.Collections;
  * <p>Usage:
  * <pre>{@code
  * TrustConfig trust = TrustConfig.loadFile(Path.of("trust.json"));
- * Verifier verifier = Verifier.builder().trust(trust).build();
+ * Verifier verifier = Verifier.builder().build().addAnchor(trust);
  * verifier.verify(payloadBytes)
  *         .thenAccept(ok -> System.out.println(ok.claims()));
  * }</pre>
@@ -99,27 +99,22 @@ public final class Verifier {
         private HttpClient          httpClient;
         private NoteProvider        noteProvider;
         private RevocationProvider  revocationProvider;
-        // Optional initial anchor — registered immediately after build() for convenience.
-        private TrustConfig         initialAnchor;
 
-        /** Pre-register one anchor (convenience — equivalent to build().addAnchor(v)). */
-        public Builder trust(TrustConfig v)       { initialAnchor = v; return this; }
         public Builder httpClient(HttpClient v)    { httpClient = v; return this; }
         /** Inject a note provider for testing — bypasses HTTP. */
         public Builder noteProvider(NoteProvider v){ noteProvider = v; return this; }
         /** Inject a revocation provider for testing — bypasses HTTP. */
         public Builder revocationProvider(RevocationProvider v){ revocationProvider = v; return this; }
 
+        /** Build an empty Verifier. Call {@link Verifier#addAnchor} to register issuers. */
         public Verifier build() {
-            Verifier v = new Verifier(
+            return new Verifier(
                 httpClient != null ? httpClient :
                     HttpClient.newBuilder()
                         .connectTimeout(Duration.ofSeconds(10))
                         .build(),
                 noteProvider,
                 revocationProvider);
-            if (initialAnchor != null) v.addAnchor(initialAnchor);
-            return v;
         }
     }
 

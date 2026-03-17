@@ -95,14 +95,12 @@ export class Verifier {
    *                    from `trust.checkpointUrl` via HTTP.
    */
   /**
-   * Create a Verifier. If `trust` is provided it is registered as the first anchor
-   * (backwards-compatible single-anchor usage). For multi-anchor, omit `trust` and
-   * call `addAnchor()` for each issuer.
+   * Create an empty Verifier. Register issuers with `addAnchor()` before verifying.
+   * Optionally inject note/revocation providers for testing (bypass HTTP).
    */
-  constructor(trust?: TrustConfig, noteProvider?: NoteProvider, revocationProvider?: RevocationProvider) {
+  constructor(noteProvider?: NoteProvider, revocationProvider?: RevocationProvider) {
     this.noteProvider       = noteProvider;
     this.revocationProvider = revocationProvider;
-    if (trust) this.addAnchor(trust);
   }
 
   /** Register a trusted issuer. Returns `this` for chaining. */
