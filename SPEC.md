@@ -1458,18 +1458,35 @@ party can independently verify the filter is consistent with the CA's published
 revocation data. This check is possible because the CA's revocation data is
 independently verifiable (CA-signed) and publicly available.
 
-MTA-QR does not have an equivalent mechanism in v1. The issuer is the sole
-authority for both the credential data (the log) and the revocation state.
-There is no independently verifiable record that the filter correctly reflects
-all revocations the issuer has made.
+MTA-QR v1 does not have a mechanism equivalent to CRLite's independently
+verifiable CA-signed CRL inputs. The issuer is the sole authority for both the
+log and the revocation state.
 
-A v2 auditability extension would commit the revocation artifact to the log
-itself — for example, by requiring the issuer to include a hash of the current
-revocation artifact in each checkpoint body, making the revocation state
-tamper-evident and verifiable by witnesses. This would not prevent an issuer
-from omitting entries from R, but it would make the revocation state
-attributable and tamper-evident, providing a basis for post-hoc audits. This is
-deferred to a future version.
+**Revocation artifact hash commitment (partially implemented).** The Go,
+TypeScript, and Rust issuers commit a `revoc:<hex(SHA-256(artifact))>` extension
+line as the 4th line of each checkpoint body. Because extension lines are part of
+the authenticated content signed by the issuer and cosigned by witnesses, every
+checkpoint signature automatically covers the revocation state at that moment.
+Witnesses attest to the revocation state without any change to the witness
+protocol.
+
+The Java issuer does not yet emit the `revoc:` extension line. No verifier
+currently cross-checks the hash in a checkpoint against the artifact it fetches,
+so the commitment is present in signatures but not yet enforced at verification
+time. The remaining steps to complete this are:
+
+1. Java issuer: emit `revoc:<hex>` as checkpoint body line 4
+2. All verifiers: after fetching the revocation artifact, compute
+   `SHA-256(artifact_bytes)`, find the `revoc:` line in the checkpoint body,
+   and reject if the hashes do not match
+
+Once step 2 is complete, a verifier that checks both the checkpoint signature
+(covering the revoc hash) and the fetched artifact against that hash has an
+end-to-end auditable chain: the issuer cannot silently change the revocation
+state between checkpoint issuance and artifact fetch without breaking the
+witnessed signature. This does not prevent an issuer from omitting entries from
+the revoked set, but it makes the revocation state attributable and tamper-evident
+from checkpoint time onward.
 
 ### Normative Construction Parameters
 
