@@ -924,9 +924,16 @@ credentials where same-day revocation is sufficient.
 
 ### Mode 2: Online Reference
 
-The QR payload contains only the assertion content and log coordinates.
-The verifier fetches the inclusion proof from a tile server and the checkpoint
-from the issuer's endpoint at scan time.
+The QR payload contains the full assertion content (TBS) and log coordinates,
+but omits the inclusion proof hashes. The verifier fetches the inclusion proof
+from a tile server and the checkpoint from the issuer's endpoint at scan time.
+
+**The tile server is PII-blind.** Because the verifier already holds the TBS
+from scanning the physical credential, the tile server only needs to serve
+the Merkle sibling hashes required to complete the inclusion proof path. A
+sibling hash is the pre-image of a tree node — it reveals nothing about the
+content of any log entry. The tile server cannot reconstruct the claims or
+identity of any credential holder from the hashes it serves.
 
 The security properties of a correctly verified Mode 2 payload are identical
 to Mode 1. The inclusion proof is cryptographically verifiable regardless of
