@@ -239,48 +239,59 @@ func (v *Verifier) Verify(payloadBytes []byte) *Result {
 	entryHash := merkle.EntryHash(p.TBS)
 	add("Entry hash", true, fmt.Sprintf("SHA-256(0x00 ‖ tbs) = %s", hex.EncodeToString(entryHash)))
 
-	// 8. Two-phase tiled Merkle inclusion proof.
-	//
-	// Phase A — Inner proof: entry → batch root (InnerProofCount hashes).
-	// Phase B — Outer proof: batch root → parent tree root (remaining hashes).
-	//
-	// The checkpoint rootHash is the PARENT tree root (merkle root over batch
-	// roots), not a flat root over all entries. Both phases must pass.
-	//
-	// batchSize is read from the trust config (anchor.BatchSize).
-	// The spec requires verifiers to use the batch_size from the trust
-	// configuration, not a hardcoded constant.
-	batchSize := anchor.BatchSize
-	if batchSize <= 0 { batchSize = 16 } // safe default if not set
-	globalIdx    := int(p.EntryIndex)
-	innerIdx     := globalIdx % batchSize
-	batchIdx     := globalIdx / batchSize
-	numBatches   := (int(p.TreeSize) + batchSize - 1) / batchSize
-	batchStart   := batchIdx * batchSize
-	thisBatchSz  := batchSize
-	if batchStart+batchSize > int(p.TreeSize) {
-		thisBatchSz = int(p.TreeSize) - batchStart
+	// 8. Merkle inclusion proof — behaviour depends on mode.
+	if p.Mode == payload.ModeOnline {
+		// Mode 2 (online): NO INCLUSION PROOF IS VERIFIED HERE.
+		// The payload carries no proof hashes. In production the scanner fetches
+		// proof tiles from a tile server and verifies inclusion at scan time.
+		// This verifier has no tile client — it only validates entry_index < tree_size.
+		// Do not treat a Mode 2 Result.Valid=true as proof of Merkle inclusion.
+		if p.EntryIndex >= p.TreeSize {
+			return fail("Inclusion proof", fmt.Sprintf(
+				"mode=2: entry_index=%d >= tree_size=%d", p.EntryIndex, p.TreeSize))
+		}
+		add("Inclusion proof", true, fmt.Sprintf(
+			"mode=2 (online): entry_index=%d < tree_size=%d · proof fetched at scan time",
+			p.EntryIndex, p.TreeSize))
+	} else {
+		// Mode 0 / 1: two-phase tiled Merkle proof embedded in payload.
+		//
+		// Phase A — Inner proof: entry → batch root (InnerProofCount hashes).
+		// Phase B — Outer proof: batch root → parent tree root (remaining hashes).
+		//
+		// The checkpoint rootHash is the PARENT tree root (merkle root over batch
+		// roots), not a flat root over all entries. Both phases must pass.
+		//
+		// batchSize is read from the trust config (anchor.BatchSize).
+		// The spec requires verifiers to use the batch_size from the trust
+		// configuration, not a hardcoded constant.
+		batchSize := anchor.BatchSize
+		if batchSize <= 0 { batchSize = 16 }
+		globalIdx  := int(p.EntryIndex)
+		innerIdx   := globalIdx % batchSize
+		batchIdx   := globalIdx / batchSize
+		numBatches := (int(p.TreeSize) + batchSize - 1) / batchSize
+		batchStart := batchIdx * batchSize
+		thisBatchSz := batchSize
+		if batchStart+batchSize > int(p.TreeSize) {
+			thisBatchSz = int(p.TreeSize) - batchStart
+		}
+		innerCount := int(p.InnerProofCount)
+		innerProof := p.ProofHashes[:innerCount]
+		outerProof := p.ProofHashes[innerCount:]
+		batchRoot, err := merkle.ComputeRoot(entryHash, innerIdx, thisBatchSz, innerProof)
+		if err != nil {
+			return fail("Inclusion proof", fmt.Sprintf("Phase A (inner proof) failed: %v", err))
+		}
+		if err := merkle.VerifyInclusion(batchRoot, batchIdx, numBatches, outerProof, rootHash); err != nil {
+			return fail("Inclusion proof", fmt.Sprintf(
+				"Phase A: batch root %s… ✓ · Phase B (outer proof) failed: %v",
+				hex.EncodeToString(batchRoot)[:16], err))
+		}
+		add("Inclusion proof", true, fmt.Sprintf(
+			"Phase A: %d inner hashes → batch root %s… ✓ · Phase B: %d outer hashes → parent root ✓",
+			innerCount, hex.EncodeToString(batchRoot)[:16], len(outerProof)))
 	}
-
-	innerCount := int(p.InnerProofCount)
-	innerProof := p.ProofHashes[:innerCount]
-	outerProof := p.ProofHashes[innerCount:]
-
-	// Phase A: recompute batch root from entry hash + inner proof.
-	batchRoot, err := merkle.ComputeRoot(entryHash, innerIdx, thisBatchSz, innerProof)
-	if err != nil {
-		return fail("Inclusion proof", fmt.Sprintf("Phase A (inner proof) failed: %v", err))
-	}
-
-	// Phase B: verify batch root in parent tree.
-	if err := merkle.VerifyInclusion(batchRoot, batchIdx, numBatches, outerProof, rootHash); err != nil {
-		return fail("Inclusion proof", fmt.Sprintf(
-			"Phase A: batch root %s… ✓ · Phase B (outer proof) failed: %v",
-			hex.EncodeToString(batchRoot)[:16], err))
-	}
-	add("Inclusion proof", true, fmt.Sprintf(
-		"Phase A: %d inner hashes → batch root %s… ✓ · Phase B: %d outer hashes → parent root ✓",
-		innerCount, hex.EncodeToString(batchRoot)[:16], len(outerProof)))
 
 	// 9. Entry type check.
 	if len(p.TBS) < 2 {
