@@ -192,3 +192,91 @@ func TestMultipleBatchesCrossProof(t *testing.T) {
 		t.Error("expected non-empty proof for entry in non-trivial tree")
 	}
 }
+
+// --- Revocation behavioral tests ---
+
+// TestRevokeAndArtifact verifies that revoking an entry causes the
+// revocation artifact to list it in the revoked set and that un-revoked
+// entries remain valid in the cascade.
+func TestRevokeAndArtifact(t *testing.T) {
+	l := newTestLog(t)
+
+	ttl := 1 * time.Hour
+	now := uint64(time.Now().Unix())
+	idx1, _, err := l.AppendDataAssertion(now, now+uint64(ttl.Seconds()), 1, map[string]any{"subject": "alice"})
+	if err != nil { t.Fatalf("Issue 1: %v", err) }
+	idx2, _, err := l.AppendDataAssertion(now, now+uint64(ttl.Seconds()), 1, map[string]any{"subject": "bob"})
+	if err != nil { t.Fatalf("Issue 2: %v", err) }
+
+	// Before revocation: artifact exists, neither entry is revoked.
+	artBefore := l.LatestRevocationArtifact()
+	if artBefore == nil {
+		t.Fatal("expected artifact after issue, got nil")
+	}
+	if l.IsRevoked(idx1) {
+		t.Errorf("idx1=%d should not be revoked before Revoke()", idx1)
+	}
+	if l.IsRevoked(idx2) {
+		t.Errorf("idx2=%d should not be revoked before Revoke()", idx2)
+	}
+
+	// Revoke alice.
+	if err := l.Revoke(idx1); err != nil {
+		t.Fatalf("Revoke(%d): %v", idx1, err)
+	}
+
+	// After revocation: alice is revoked, bob is not.
+	if !l.IsRevoked(idx1) {
+		t.Errorf("idx1=%d should be revoked after Revoke()", idx1)
+	}
+	if l.IsRevoked(idx2) {
+		t.Errorf("idx2=%d should not be revoked (only idx1 was revoked)", idx2)
+	}
+
+	// Artifact must have changed.
+	artAfter := l.LatestRevocationArtifact()
+	if string(artAfter) == string(artBefore) {
+		t.Error("artifact did not change after Revoke()")
+	}
+}
+
+// TestRevokeIndexZeroRejected verifies that revoking the null entry is rejected.
+func TestRevokeIndexZeroRejected(t *testing.T) {
+	l := newTestLog(t)
+	if err := l.Revoke(0); err == nil {
+		t.Error("expected error revoking index 0, got nil")
+	}
+}
+
+// TestRevokeUnissuedRejected verifies that revoking an entry beyond
+// the current tree size is rejected.
+func TestRevokeUnissuedRejected(t *testing.T) {
+	l := newTestLog(t)
+	if err := l.Revoke(999); err == nil {
+		t.Error("expected error revoking unissued index 999, got nil")
+	}
+}
+
+// TestMultipleRevocations verifies that revoking several entries
+// marks exactly those entries as revoked in the cascade.
+func TestMultipleRevocations(t *testing.T) {
+	l := newTestLog(t)
+	indices := make([]uint64, 4)
+	for i := range indices {
+		now2 := uint64(time.Now().Unix())
+		idx, _, err := l.AppendDataAssertion(now2, now2+3600, 1, map[string]any{"i": i})
+		if err != nil { t.Fatalf("Issue %d: %v", i, err) }
+		indices[i] = idx
+	}
+
+	// Revoke indices[1] and indices[3].
+	if err := l.Revoke(indices[1]); err != nil { t.Fatalf("Revoke[1]: %v", err) }
+	if err := l.Revoke(indices[3]); err != nil { t.Fatalf("Revoke[3]: %v", err) }
+
+	for i, idx := range indices {
+		want := (i == 1 || i == 3)
+		if l.IsRevoked(idx) != want {
+			t.Errorf("indices[%d]=%d: IsRevoked=%v want %v", i, idx, l.IsRevoked(idx), want)
+		}
+	}
+}

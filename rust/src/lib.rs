@@ -325,3 +325,135 @@ mod vector_tests {
         assert!(!c.query(99));
     }
 }
+
+#[cfg(test)]
+mod revocation_tests {
+    use crate::issuer::{Issuer, IssuerConfig};
+    use crate::verifier::Verifier;
+    use crate::trust::TrustConfig;
+    use std::time::Duration;
+
+    const SEED: [u8; 32] = {
+        let mut s = [0u8; 32];
+        s[0] = 0x27; s[1] = 0x5b; s[2] = 0xe8; s[3] = 0x5b;
+        s[4] = 0x9a; s[5] = 0xa3; s[6] = 0x35; s[7] = 0x7c;
+        s
+    };
+
+    async fn make_issuer(label: &str) -> Issuer {
+        use crate::signers::local::LocalSigner;
+        let signer = LocalSigner::ed25519(&SEED).unwrap();
+        let cfg = IssuerConfig {
+            origin:        format!("test.revoc/{label}/v1"),
+            schema_id:     1,
+            mode:          None,
+            batch_size:    None,
+            witness_count: Some(1), // minimum required by TrustConfig validation
+        };
+        let issuer = Issuer::new(cfg, signer);
+        issuer.init().await.unwrap();
+        issuer
+    }
+
+    async fn make_verifier(issuer: &Issuer) -> Verifier {
+        let tc_json = issuer.trust_config_json("http://localhost:0/checkpoint").await.unwrap();
+        let trust   = TrustConfig::parse_str(&tc_json).unwrap();
+        // Snapshot checkpoint note and revocation artifact — avoids HTTP in unit tests.
+        let note  = issuer.checkpoint_note().await.unwrap();
+        let revoc = issuer.revocation_artifact().await.unwrap_or_default();
+        let note_provider: crate::verifier::NoteProvider =
+            Box::new(move |_: &str| -> anyhow::Result<String> { Ok(note.clone()) });
+        let revoc_provider: crate::verifier::RevocationProvider =
+            Box::new(move |_: &str| -> anyhow::Result<String> { Ok(revoc.clone()) });
+        Verifier::with_revocation_provider(trust, note_provider, revoc_provider)
+    }
+
+    #[tokio::test]
+    async fn un_revoked_entry_verifies() {
+        let issuer = make_issuer("not-revoked").await;
+        let qr     = issuer.issue([("subject", "alice")], Duration::from_secs(3600)).await.unwrap();
+        let v      = make_verifier(&issuer).await;
+        assert!(v.verify(&qr.payload).await.is_ok(), "un-revoked entry must verify");
+    }
+
+    #[tokio::test]
+    async fn revoked_entry_is_rejected() {
+        let issuer = make_issuer("revoked").await;
+        let qr     = issuer.issue([("subject", "bob")], Duration::from_secs(3600)).await.unwrap();
+        issuer.revoke(qr.entry_index).await.unwrap();
+        let v      = make_verifier(&issuer).await;
+        let result = v.verify(&qr.payload).await;
+        assert!(result.is_err(), "revoked entry must be rejected");
+        assert!(result.unwrap_err().to_string().contains("revoked"),
+            "error must mention 'revoked'");
+    }
+
+    #[tokio::test]
+    async fn revoke_zero_rejected() {
+        let issuer = make_issuer("zero").await;
+        assert!(issuer.revoke(0).await.is_err(), "revoking index 0 must fail");
+    }
+
+    #[tokio::test]
+    async fn mode_zero_rejected() {
+        // Build a mode=0 payload using the SDK encoder and confirm the verifier
+        // rejects it with a clear "not implemented" message.
+        use crate::issuer::{Issuer, IssuerConfig};
+        use crate::verifier::Verifier;
+        use crate::trust::TrustConfig;
+        use crate::signers::local::LocalSigner;
+
+        let signer = LocalSigner::ed25519(&SEED).unwrap();
+        let cfg = IssuerConfig {
+            origin:        "test.revoc/mode0/v1".into(),
+            schema_id:     1,
+            mode:          None,
+            batch_size:    None,
+            witness_count: Some(1),
+        };
+        let issuer = Issuer::new(cfg, signer);
+        issuer.init().await.unwrap();
+
+        let tc_json = issuer.trust_config_json("http://localhost:0/checkpoint").await.unwrap();
+        let trust   = TrustConfig::parse_str(&tc_json).unwrap();
+        let note    = issuer.checkpoint_note().await.unwrap();
+        let revoc   = issuer.revocation_artifact().await.unwrap_or_default();
+        let v = Verifier::with_revocation_provider(
+            trust,
+            Box::new(move |_| Ok(note.clone())),
+            Box::new(move |_| Ok(revoc.clone())),
+        );
+
+        // Craft a mode=0 payload: version=1, flags=(sigAlg=6<<2)|(mode=0)=0x18
+        // followed by origin_id(8) + tree_size(8) + entry_index(8) + proof counts(2) + tbs_len(2) + tbs(1)
+        // + root_hash(32) + issuer_sig_len(2) + issuer_sig(64) + cosig_count(1)
+        let trust2 = TrustConfig::parse_str(
+            &issuer.trust_config_json("http://localhost:0/checkpoint").await.unwrap()
+        ).unwrap();
+        let origin_id = trust2.origin_id.to_be_bytes();
+        // Build a payload with mode=0 set in flags but no embedded checkpoint fields.
+        // The Rust decoder reads up to TBS then stops — mode=0 trailing fields are
+        // not parsed, so we only include bytes through TBS. The verifier's mode check
+        // fires before it tries to do anything else with the payload.
+        // flags: version=1, no self-describing(0x00), sigAlg=Ed25519(6<<2=0x18), mode=0 -> 0x18
+        let mut payload = vec![0x01u8, 0x18]; // version=1, sigAlg=Ed25519, mode=0
+        payload.extend_from_slice(&origin_id);
+        payload.extend_from_slice(&2u64.to_be_bytes()); // tree_size
+        payload.extend_from_slice(&1u64.to_be_bytes()); // entry_index
+        payload.push(0); payload.push(0); // proof_count=0, inner_count=0
+        payload.push(0); payload.push(1); // tbs_len=1
+        payload.push(0x01); // minimal TBS (data assertion type byte)
+
+        let result = v.verify(&payload).await;
+        assert!(result.is_err(), "mode=0 must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Mode 0") || msg.contains("not implemented"),
+            "expected mode=0 rejection, got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn revoke_unissued_rejected() {
+        let issuer = make_issuer("unissued").await;
+        assert!(issuer.revoke(999).await.is_err(), "revoking unissued index must fail");
+    }
+}

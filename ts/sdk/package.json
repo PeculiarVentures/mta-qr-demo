@@ -5,7 +5,7 @@
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
-    "test": "npx tsx src/test/vectors.test.ts && npx tsx src/test/signing.test.ts && npx tsx src/test/cascade.test.ts && npx tsx src/test/all.test.ts",
+    "test": "npx tsx src/test/vectors.test.ts && npx tsx src/test/signing.test.ts && npx tsx src/test/cascade.test.ts && npx tsx src/test/revocation.test.ts && npx tsx src/test/all.test.ts",
     "typecheck": "npx tsc --noEmit"
   },
   "license": "Apache-2.0",

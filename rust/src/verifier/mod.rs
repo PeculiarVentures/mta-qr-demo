@@ -29,7 +29,7 @@ pub struct VerifyOk {
     pub schema_id:   u64,
     pub issued_at:   u64,
     pub expires_at:  u64,
-    pub claims:      HashMap<String, String>,
+    pub claims:      HashMap<String, serde_json::Value>,
 }
 
 /// Why a verification failed.
@@ -61,7 +61,9 @@ impl TraceResult {
 }
 
 /// A function that provides checkpoint notes without HTTP. Used in tests.
-pub type NoteProvider = Box<dyn Fn(&str) -> Result<String> + Send + Sync>;
+pub type NoteProvider        = Box<dyn Fn(&str) -> Result<String> + Send + Sync>;
+/// Provides revocation artifacts without HTTP. Used in tests.
+pub type RevocationProvider  = Box<dyn Fn(&str) -> Result<String> + Send + Sync>;
 
 /// Cached revocation artifact per origin.
 struct CachedRevocation {
@@ -71,22 +73,30 @@ struct CachedRevocation {
 
 /// The MTA-QR verifier.
 pub struct Verifier {
-    trust:         TrustConfig,
-    note_provider: Option<NoteProvider>,
-    cache:       Mutex<(VecDeque<String>, HashMap<String, Vec<u8>>)>,
-    revoc_cache: Mutex<HashMap<String, CachedRevocation>>,
+    trust:              TrustConfig,
+    note_provider:      Option<NoteProvider>,
+    revocation_provider: Option<RevocationProvider>,
+    cache:              Mutex<(VecDeque<String>, HashMap<String, Vec<u8>>)>,
+    revoc_cache:        Mutex<HashMap<String, CachedRevocation>>,
 }
 
 impl Verifier {
     /// Create a Verifier from a trust config.
     pub fn new(trust: TrustConfig) -> Self {
-        Self { trust, note_provider: None, cache: Mutex::new((VecDeque::new(), HashMap::new())), revoc_cache: Mutex::new(HashMap::new()) }
+        Self { trust, note_provider: None, revocation_provider: None, cache: Mutex::new((VecDeque::new(), HashMap::new())), revoc_cache: Mutex::new(HashMap::new()) }
     }
 
     /// Create a Verifier that fetches checkpoint notes via `provider`.
     /// Used in tests to avoid HTTP.
     pub fn with_note_provider(trust: TrustConfig, provider: NoteProvider) -> Self {
-        Self { trust, note_provider: Some(provider), cache: Mutex::new((VecDeque::new(), HashMap::new())), revoc_cache: Mutex::new(HashMap::new()) }
+        Self { trust, note_provider: Some(provider), revocation_provider: None, cache: Mutex::new((VecDeque::new(), HashMap::new())), revoc_cache: Mutex::new(HashMap::new()) }
+    }
+
+    /// Create a Verifier with a revocation artifact provider (for tests — bypasses HTTP).
+    pub fn with_revocation_provider(trust: TrustConfig, note: NoteProvider, revoc: RevocationProvider) -> Self {
+        Self { trust, note_provider: Some(note), revocation_provider: Some(revoc),
+               cache: Mutex::new((VecDeque::new(), HashMap::new())),
+               revoc_cache: Mutex::new(HashMap::new()) }
     }
 
     /// Verify a QR code payload. Returns `Ok(VerifyOk)` or `Err(VerifyFail)`.
@@ -132,13 +142,19 @@ impl Verifier {
         if p.entry_index == 0 { fail!("entry index", "entry_index=0 is reserved for null_entry"); }
         add!(true, "entry index", format!("entry_index={} valid", p.entry_index));
 
-        // 3. Origin ID
+        // 3. Mode check — reject Mode 0 before any network work.
+        if p.mode == 0 {
+            fail!("mode check",
+                "Mode 0 (embedded checkpoint) is not implemented by this verifier — use Mode 1");
+        }
+
+        // 4. Origin ID
         if p.origin_id != self.trust.origin_id {
             fail!("origin id", format!("payload origin_id 0x{:016x} does not match trust config", p.origin_id));
         }
         add!(true, "origin id", format!("matches trust config: {:?}", self.trust.origin));
 
-        // 4. Self-describing origin consistency
+        // 5. Self-describing origin consistency
         if let Some(ref env_origin) = p.origin {
             if env_origin != &self.trust.origin {
                 fail!("origin consistency", format!("envelope {:?} != trust config {:?}", env_origin, self.trust.origin));
@@ -146,13 +162,13 @@ impl Verifier {
             add!(true, "origin consistency", "envelope matches trust config");
         }
 
-        // 5. Algorithm binding
+        // 6. Algorithm binding
         if p.sig_alg != self.trust.sig_alg {
             fail!("algorithm binding", format!("payload sig_alg={} but trust config requires {}", p.sig_alg, self.trust.sig_alg));
         }
         add!(true, "algorithm binding", format!("sig_alg={} matches trust config", p.sig_alg));
 
-        // 6. Checkpoint resolution
+        // 7. Checkpoint resolution
         let cache_key = format!("{}:{}", self.trust.origin, p.tree_size);
         let cached_root = self.cache.lock().unwrap().1.get(&cache_key).cloned();
 
@@ -430,6 +446,11 @@ impl Verifier {
     /// Fetch and parse the revocation artifact from revocation_url.
     async fn fetch_revocation_artifact(&self) -> Result<CachedRevocation> {
         let url = &self.trust.revocation_url;
+        // Use injected provider if available (tests bypass HTTP this way).
+        if let Some(ref provider) = self.revocation_provider {
+            let raw = provider(url)?;
+            return self.parse_revocation_artifact(&raw);
+        }
         let raw = {
             #[cfg(feature = "goodkey")]
             {
@@ -577,7 +598,44 @@ pub(crate) fn decode_payload(data: &[u8]) -> Result<DecodedPayload> {
 
 // --- CBOR TBS decoding ---
 
-fn decode_tbs(cbor_bytes: &[u8]) -> Result<(u64, u64, u64, HashMap<String, String>)> {
+/// Convert a ciborium CBOR value to a serde_json::Value, preserving type information.
+/// Supports the types used in MTA-QR TBS claims: Text, Integer, Bool, Float, Null, Array, Map.
+fn cbor_to_json(v: &ciborium::Value) -> serde_json::Value {
+    use ciborium::Value;
+    match v {
+        Value::Text(s)    => serde_json::Value::String(s.clone()),
+        Value::Integer(n) => {
+            if let Ok(i) = i64::try_from(*n) {
+                serde_json::Value::Number(i.into())
+            } else {
+                serde_json::Value::String(format!("{}", i128::from(*n)))
+            }
+        }
+        Value::Bool(b)    => serde_json::Value::Bool(*b),
+        Value::Null       => serde_json::Value::Null,
+        Value::Float(f)   => {
+            serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null)
+        }
+        Value::Array(arr) => serde_json::Value::Array(arr.iter().map(cbor_to_json).collect()),
+        Value::Map(m)     => {
+            let obj: serde_json::Map<String, serde_json::Value> = m.iter()
+                .filter_map(|(k, v)| {
+                    if let Value::Text(key) = k {
+                        Some((key.clone(), cbor_to_json(v)))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            serde_json::Value::Object(obj)
+        }
+        _ => serde_json::Value::Null, // Bytes, Tag — not used in TBS claims
+    }
+}
+
+fn decode_tbs(cbor_bytes: &[u8]) -> Result<(u64, u64, u64, HashMap<String, serde_json::Value>)> {
     use ciborium::Value;
     let value: Value = ciborium::from_reader(cbor_bytes)
         .map_err(|e| anyhow!("CBOR decode: {e}"))?;
@@ -602,9 +660,11 @@ fn decode_tbs(cbor_bytes: &[u8]) -> Result<(u64, u64, u64, HashMap<String, Strin
 
     let claims = match get(4) {
         Some(Value::Map(m)) => m.iter().filter_map(|(k, v)| {
-            match (k, v) {
-                (Value::Text(k), Value::Text(v)) => Some((k.clone(), v.clone())),
-                _ => None,
+            if let Value::Text(key) = k {
+                let json_val = cbor_to_json(v);
+                Some((key.clone(), json_val))
+            } else {
+                None // non-string keys are not supported in the TBS schema
             }
         }).collect(),
         _ => HashMap::new(),

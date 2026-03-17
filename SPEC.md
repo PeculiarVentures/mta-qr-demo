@@ -2048,14 +2048,14 @@ cannot interoperate with standard tlog-checkpoint parsers. The ECDSA registratio
 is the more urgent dependency. The MTC authors and c2sp.org maintainers are the
 right people to engage on these PRs.
 
-**Revocation: specified, not yet implemented.** The revocation wire format,
+**Revocation: specified and implemented.** The revocation wire format,
 filter cascade construction, security model, authorization model, rollback
-resistance, and verifier behavior are now defined in §Revocation. The reference
-implementations emit a documented stub ("not implemented") for the revocation
-check step. Implementing the Bloom filter cascade is the primary remaining v1
-task for the SDK layer. The Mozilla CRLite implementation
-(github.com/mozilla/crlite, MPL-2.0) is the reference for the cascade
-construction. Delta updates are deferred to v2.
+resistance, and verifier behavior are defined in §Revocation. All four
+reference SDK implementations (Go, TypeScript, Rust, Java) implement the
+Bloom filter cascade, issuer artifact signing, and verifier artifact fetch,
+signature verification, staleness check, and cascade query — fail-closed
+throughout. The cascade construction follows SPEC.md §Revocation normative
+parameters, not the CRLite wire format. Delta updates are deferred to v2.
 
 **Revocation auditability: deferred to v2.** The current protocol has no
 mechanism for independent verification that the issuer's filter correctly

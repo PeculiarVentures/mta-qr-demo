@@ -11,7 +11,8 @@
 
 import { randomBytes } from "crypto";
 import { Signer } from "./signer.js";
-import { encodeTbs, encodeNullTbs, DataAssertionEntry, Claims } from "./cbor.js";
+import { encodeTbs, encodeNullTbs, decodeTbs, DataAssertionEntry, Claims } from "./cbor.js";
+import { Cascade } from "./cascade.js";
 import { entryHash, inclusionProof, computeRoot } from "./merkle.js";
 import {
   checkpointBody, signCheckpointBody, signCosignature,
@@ -98,7 +99,9 @@ export class Issuer {
 
   private batches:       Batch[]    = [];
   private currentBatch:  LogEntry[] = [];
-  private latestCkpt:    SignedCheckpoint | null = null;
+  private latestCkpt:        SignedCheckpoint | null = null;
+  private revokedIndices:    Set<bigint>            = new Set();
+  private latestRevArtifact: string | null           = null;
   private sigAlg:        number     = 0;
   private issuerPub:     Uint8Array = new Uint8Array(0);
   private issuerKeyId:   Uint8Array = new Uint8Array(4);
@@ -181,6 +184,7 @@ export class Issuer {
       sig_alg:            this.sigAlg,
       witness_quorum:     this.witnesses.length,
       checkpoint_url:     checkpointUrl,
+      revocation_url:     checkpointUrl.replace(/\/checkpoint$/, "/revoked"),
       batch_size:         this.batchSize,
       witnesses: this.witnesses.map(w => ({
         name:        w.name,
@@ -188,6 +192,33 @@ export class Issuer {
         pub_key_hex: Buffer.from(w.pub).toString("hex"),
       })),
     }, null, 2);
+  }
+
+  /**
+   * Revoke an entry by index.
+   * The revocation artifact is rebuilt immediately and served from
+   * `revocationArtifact()`. Throws if `entryIndex` is 0 (null entry)
+   * or refers to an entry that has not been issued yet.
+   */
+  async revoke(entryIndex: bigint): Promise<void> {
+    if (!this.initialized) throw new Error("Issuer: call init() before revoke()");
+    if (entryIndex === 0n) throw new Error("entry_index=0 is the null entry and cannot be revoked");
+    const treeSize = BigInt(this.totalEntries());
+    if (entryIndex >= treeSize) {
+      throw new Error(`entry_index=${entryIndex} not yet issued (tree_size=${treeSize})`);
+    }
+    this.revokedIndices.add(entryIndex);
+    const ckpt = this.latestCkpt!;
+    this.latestRevArtifact = await this.buildRevocationArtifact(ckpt.treeSize);
+  }
+
+  /**
+   * Returns the current signed revocation artifact string.
+   * Serve this from a `GET /revoked` HTTP endpoint.
+   * Returns null if init() has not been called yet.
+   */
+  revocationArtifact(): string | null {
+    return this.latestRevArtifact;
   }
 
   /** The current signed checkpoint note (tlog-checkpoint signed-note format). */
@@ -253,6 +284,54 @@ export class Issuer {
       return { keyId: w.keyId, timestamp: ts, signature: s64 };
     });
     this.latestCkpt = { treeSize, rootHash: parentRoot, body, issuerSig, cosigs };
+    this.latestRevArtifact = await this.buildRevocationArtifact(treeSize);
+  }
+
+  private async buildRevocationArtifact(treeSize: number): Promise<string> {
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    const revoked: bigint[] = [];
+    const valid:   bigint[] = [];
+
+    const all = [
+      ...this.batches.flatMap(b => b.entries),
+      ...this.currentBatch,
+    ];
+    for (const e of all) {
+      if (e.index === 0) continue;
+      const idx = BigInt(e.index);
+      if (this.revokedIndices.has(idx)) {
+        revoked.push(idx);
+      } else {
+        // Exclude expired entries — read expiry_time from TBS CBOR field 2.
+        const exp = this.entryExpiryTime(e.tbs);
+        if (exp > 0n && exp < now) continue;
+        valid.push(idx);
+      }
+    }
+
+    const casc    = Cascade.build(revoked, valid);
+    const cascB64 = Buffer.from(casc.encode()).toString("base64");
+    const body    = `${this.origin}
+${treeSize}
+mta-qr-revocation-v1
+${cascB64}
+`;
+    const sig     = await this.signer.sign(new TextEncoder().encode(body));
+    const sigPayload = new Uint8Array(4 + sig.length);
+    sigPayload.set(this.issuerKeyId, 0);
+    sigPayload.set(sig, 4);
+    const sigB64 = Buffer.from(sigPayload).toString("base64");
+    return `${body}
+— ${this.signer.keyName} ${sigB64}
+`;
+  }
+
+  private entryExpiryTime(tbs: Uint8Array): bigint {
+    if (tbs.length < 2 || tbs[0] !== 0x01) return 0n;
+    try {
+      const entry = decodeTbs(tbs.slice(1));
+      return BigInt(entry.times[1]);
+    } catch { return 0n; }
   }
 
   private buildPayload(entryIdx: number, tbs: Uint8Array): Uint8Array {
