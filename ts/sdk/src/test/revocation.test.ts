@@ -27,10 +27,10 @@ async function makeFixture(label: string) {
     const trust = parseTrustConfig(
       issuer.trustConfigJson("http://localhost:0/checkpoint")
     );
-    return new Verifier(trust,
+    return new Verifier(
       () => issuer.checkpointNote(),
       () => issuer.revocationArtifact() ?? ""
-    );
+    ).addAnchor(trust);
   }
 
   return { issuer, makeVerifier };
@@ -76,13 +76,13 @@ describe("revocation", () => {
     const trust = parseTrustConfig(issuer.trustConfigJson("http://localhost:0/checkpoint"));
     const revArt = () => issuer.revocationArtifact() ?? "";
 
-    const r1 = await new Verifier(trust, () => note1, revArt).verify(new Uint8Array(qr1.payload));
+    const r1 = await new Verifier(() => note1, revArt).addAnchor(trust).verify(new Uint8Array(qr1.payload));
     assert.equal(r1.valid, true, "alice must still verify");
 
-    const r3 = await new Verifier(trust, () => note3, revArt).verify(new Uint8Array(qr3.payload));
+    const r3 = await new Verifier(() => note3, revArt).addAnchor(trust).verify(new Uint8Array(qr3.payload));
     assert.equal(r3.valid, true, "carol must still verify");
 
-    const r2 = await new Verifier(trust, () => note2, revArt).verify(new Uint8Array(qr2.payload));
+    const r2 = await new Verifier(() => note2, revArt).addAnchor(trust).verify(new Uint8Array(qr2.payload));
     assert.equal(r2.valid, false, "bob must be rejected");
   });
 
@@ -100,7 +100,7 @@ describe("revocation", () => {
     const revArt = () => issuer.revocationArtifact() ?? "";
 
     for (const [i, { qr, note }] of issued.entries()) {
-      const r = await new Verifier(trust, () => note, revArt).verify(new Uint8Array(qr.payload));
+      const r = await new Verifier(() => note, revArt).addAnchor(trust).verify(new Uint8Array(qr.payload));
       const wantRevoked = (i === 1 || i === 3);
       assert.equal(r.valid, !wantRevoked, `issued[${i}] valid=${r.valid} want ${!wantRevoked}`);
     }
@@ -124,7 +124,7 @@ describe("mode 0 rejection", () => {
   it("rejects mode=0 payload with clear error", async () => {
     const { issuer } = await makeFixture("mode0-reject");
     const trust = parseTrustConfig(issuer.trustConfigJson("http://localhost:0/checkpoint"));
-    const v = new Verifier(trust, () => issuer.checkpointNote());
+    const v = new Verifier(() => issuer.checkpointNote()).addAnchor(trust);
 
     // Build a well-formed mode=0 payload using the SDK encoder.
     // Mode 0 embeds the checkpoint; this verifier does not implement it.

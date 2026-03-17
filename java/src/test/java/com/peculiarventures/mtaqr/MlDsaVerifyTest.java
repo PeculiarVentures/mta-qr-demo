@@ -79,10 +79,9 @@ public class MlDsaVerifyTest {
         TrustConfig trust = TrustConfig.parse(trustJson);
         String revArtifact = issuer.revocationArtifact();
         Verifier verifier = Verifier.builder()
-                .trust(trust)
                 .noteProvider(url -> java.util.concurrent.CompletableFuture.completedFuture(noteString))
                 .revocationProvider(url -> java.util.concurrent.CompletableFuture.completedFuture(revArtifact))
-                .build();
+                .build().addAnchor(trust);
 
         // verify() returns VerifyOk on success, throws VerifyFail exceptionally on failure.
         var result = verifier.verify(issued.payload()).get();
