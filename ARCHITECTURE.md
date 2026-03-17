@@ -227,6 +227,65 @@ Same single-page HTML pattern. Left panel: trust anchor loading + payload paste 
 
 ---
 
+## Revocation (`go/shared/cascade/`, `ts/sdk/src/cascade.ts`, `rust/src/cascade.rs`, `java/.../cascade/Cascade.java`)
+
+### Cascade algorithm
+
+The revocation artifact is a **Bloom filter cascade** — a multi-level filter where each level eliminates false positives from the level above. The construction follows SPEC.md §Revocation normative parameters:
+
+- `k=1` hash function per level: `bit_position(x, i) = big_endian_u64(SHA-256(x_be8 || uint8(i))[0:8]) mod m`
+- `BITS_PER_ELEMENT = 1.4427` (= 1/ln2, optimal for k=1)
+- `MIN_FILTER_BITS = 8`, `MAX_LEVELS = 32`
+- MSB-first bit encoding; filter size rounded up to byte boundary
+
+`Build(revoked []uint64, valid []uint64) → Cascade` constructs the cascade. At each level, the filter is sized for the current `include` set; the `exclude` set identifies false positives that become the next level's `include` set (with the sets swapping roles). `Query(x)` traverses levels: a miss at any level returns immediately, alternating the result on each hit from level 1 onward.
+
+The canonical test vector R1 (`R={2,5}`, `S={1,3,4,6,7,8}`) produces `01000000080112` in all four language implementations. This 7-byte hex value is locked in `test-vectors/vectors.json` and asserted in every language test suite — a cross-language divergence causes an immediate test failure.
+
+### Signed artifact wire format
+
+```
+<origin>
+
+<tree_size>
+
+mta-qr-revocation-v1
+
+<base64(cascade_bytes)>
+
+
+
+— <issuer_key_name> <base64(key_hash_4 || signature)>
+
+```
+
+The artifact is a signed note (c2sp.org/signed-note format). The issuer signs with the same key as checkpoints. Algorithm binding: the verifier uses `sig_alg` from the trust config, never infers from key or signature length.
+
+### Issuer implementation
+
+Both Go and TypeScript HTTP issuers maintain a `revokedIndices` set and rebuild the artifact on every `publishCheckpoint()` call. The Java SDK `Issuer` class exposes `revoke(long entryIndex)` and `revocationArtifact()` for embedding in applications. The Rust SDK `Issuer` has the cascade available but does not expose HTTP endpoints — Rust is a library SDK.
+
+Artifact construction: iterates all log entries, skips index 0 (null entry) and expired entries, partitions into R (revoked) and S (valid), builds the cascade, signs the body.
+
+### Verifier implementation
+
+All four verifiers implement the same algorithm:
+
+1. If `revocation_url` is empty → skip, fail-open (correct for Mode 0 pre-loaded deployments)
+2. Check `revocCache[origin]` for a cached artifact
+3. Staleness: if `checkpoint_tree_size - cached.tree_size > STALE_THRESHOLD (32)` → treat as miss
+4. On miss: fetch `GET revocation_url`, parse, verify signature, decode cascade, cache
+5. Coverage: if `artifact.tree_size <= entry_index` → fail-closed (entry not covered)
+6. Query: `cascade.Query(entry_index)` → revoked or not
+
+Fail-closed throughout: any fetch error, parse error, or signature failure → reject.
+
+### Revocation cache semantics
+
+The staleness threshold (32 = 2 × BATCH_SIZE) limits how stale a cached artifact can be relative to the checkpoint's tree_size embedded in the payload. It bounds rollback attack exposure without requiring a network round-trip on every scan. The threshold is not a TTL — it is a tree_size delta. A cached artifact remains valid as long as the current checkpoint hasn't advanced more than 32 entries beyond it.
+
+---
+
 ## Test harness
 
 ### TypeScript type checking
@@ -243,7 +302,7 @@ See [`test-vectors/README.md`](test-vectors/README.md) for the format and how to
 
 ### Interop test (`interop_test.py`)
 
-Builds Go binaries, starts all services as subprocesses, runs the 12-cell positive matrix (3 algorithms × 4 impl pairs) plus 3 negative tests, prints per-step traces, exits 0 on 15/15.
+Builds Go binaries, starts all services as subprocesses, runs the 12-cell positive matrix (3 algorithms × 4 impl pairs), 3 negative tests, and 2 cross-implementation revocation tests (Go issuer → TS verifier and TS issuer → Go verifier), prints per-step traces, exits 0 on 17/17.
 
 Uses `MTA_PORT`, `MTA_ORIGIN`, and `MTA_SIG_ALG` environment variables to start multiple instances of the same binary with different configurations. Each algorithm variant gets a distinct origin string to avoid checkpoint cache collisions.
 
@@ -258,6 +317,14 @@ The SDK bundle is compiled from `ts/sdk/src/browser-bundle.ts` by esbuild. CI re
 ---
 
 ## Design decisions
+
+**Multi-anchor (Go HTTP service) vs single-anchor (SDK libraries).**  
+The Go and TypeScript **HTTP verifier services** (`go/verifier/`, `ts/verifier/`) hold a map of trust anchors keyed by `origin_id` and route incoming payloads to the matching anchor. A single running verifier instance can verify payloads from multiple issuers simultaneously. The `POST /load-trust-config` endpoint registers anchors at runtime.
+
+The **SDK libraries** (Go `go/verifier/verify/`, TypeScript `ts/sdk/src/verifier.ts`, Rust `rust/src/verifier/`, Java `java/.../verifier/`) are single-anchor: each `Verifier` instance is bound to exactly one `TrustConfig` at construction time. Multi-issuer verification requires one `Verifier` instance per issuer. This is the conventional SDK pattern — it keeps the interface simple and avoids shared mutable state between issuers.
+
+This is an intentional design difference, not an oversight. The HTTP service layer wraps the SDK verifier in a routing layer; the SDK itself stays simple. If an SDK consumer needs multi-anchor routing, they manage a `Map<originId, Verifier>` themselves.
+
 
 **Why a tiled two-level Merkle tree?**  
 See the dedicated section above. Short answer: bounds the inclusion proof to a hard maximum of 8 hashes (256 bytes) regardless of total log size, which keeps the QR code version fixed forever even under continuous rotation. A flat tree's proof grows by one hash every time the entry count doubles.

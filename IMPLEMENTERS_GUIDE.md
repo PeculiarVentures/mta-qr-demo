@@ -514,15 +514,15 @@ honestly.
 - Two-phase Merkle inclusion proof
 - Expiry check
 
-### Steps that are legitimately stubbed in the reference implementation
+### Steps that are legitimately not yet implemented in the reference implementation
 
-**Revocation (step 9):** the revocation protocol is fully specified in SPEC.md §Revocation,
-including the security model, authorization model, rollback resistance, and all
-normative construction parameters. The reference implementations still stub this step:
+**Revocation (step 9) is fully implemented** across all four language SDKs and both
+HTTP service implementations (Go and TypeScript). Issuers serve a signed Bloom filter
+cascade at `GET /revoked` and accept `POST /revoke`. Verifiers fetch the artifact on
+cache miss, verify the issuer signature with algorithm binding, apply a staleness check
+(STALE_THRESHOLD=32 entries), and query the cascade fail-closed. See §Implementation
+Notes below for the complete verifier algorithm.
 
-```
-add("Revocation check", true, "not implemented — no revocation list defined")
-```
 
 **Security model summary for implementers.** Read SPEC.md §Revocation — Security
 Model before writing any code. Key points that affect implementation decisions:
@@ -874,7 +874,10 @@ handling every edge, here is what "minimal correct Mode 1 verifier" means:
 8. Verify the two-phase Merkle proof: Phase A from entry_hash to batch_root
    (inner_proof_count hashes), Phase B from batch_root to root_hash (remaining
    hashes). Reject on mismatch.
-9. (Stub): note that revocation is not checked.
+9. **Revocation check:** fetch `GET revocation_url`, verify the issuer signature,
+   decode the Bloom filter cascade, query `entry_index`. Fail-closed if the artifact
+   is unavailable or invalid. Skip (fail-open) if `revocation_url` is empty.
+   See SPEC.md §Revocation for the full algorithm and STALE_THRESHOLD semantics.
 10. Verify `expiry_time + 600 > current_unix_time`. Reject if expired.
 11. Decode `entry_type_byte`. For 0x01 (data assertion): decode the CBOR entry
     and return the claims.
@@ -883,7 +886,7 @@ handling every edge, here is what "minimal correct Mode 1 verifier" means:
 - Mode 0 (reject with clear error)
 - Mode 2 (tile fetching not implemented — note this clearly in the result)
 - key_assertion Type 0x02 (reject with clear error)
-- Revocation (document the stub)
+- Mode 0 revocation (pre-loaded artifact required; HTTP fetch not applicable)
 
 A verifier that does all of the above correctly passes the interop matrix for
 Mode 1 data assertions against any correct issuer.

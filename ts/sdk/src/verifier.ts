@@ -77,10 +77,13 @@ interface CachedCheckpoint {
 // BATCH_SIZE is read from trust.batchSize at verification time
 
 export type NoteProvider = (url: string) => string | Promise<string>;
+/** Provides revocation artifacts without HTTP. Used in tests. */
+export type RevocationProvider = (url: string) => string | Promise<string>;
 
 export class Verifier {
   private readonly trust: TrustConfig;
-  private readonly noteProvider: NoteProvider | undefined;
+  private readonly noteProvider:        NoteProvider       | undefined;
+  private readonly revocationProvider:  RevocationProvider | undefined;
   // Bounded cache: cap at MAX_CACHE_ENTRIES to prevent memory exhaustion
   // from payloads with rapidly incrementing tree_size values.
   private static readonly MAX_CACHE_ENTRIES = 1000;
@@ -93,9 +96,10 @@ export class Verifier {
    *                    or offline use). If omitted, the verifier fetches the note
    *                    from `trust.checkpointUrl` via HTTP.
    */
-  constructor(trust: TrustConfig, noteProvider?: NoteProvider) {
-    this.trust        = trust;
-    this.noteProvider = noteProvider;
+  constructor(trust: TrustConfig, noteProvider?: NoteProvider, revocationProvider?: RevocationProvider) {
+    this.trust              = trust;
+    this.noteProvider       = noteProvider;
+    this.revocationProvider = revocationProvider;
   }
 
   /**
@@ -127,7 +131,13 @@ export class Verifier {
     add("decode payload", true,
       `mode=${p.mode} sig_alg=${p.sigAlg} entry_index=${p.entryIndex} tree_size=${p.treeSize}`);
 
-    // 2. Reject null entry (index 0 is reserved).
+    // 2. Mode check — reject Mode 0 before any network work.
+    if (p.mode === 0) {
+      return fail("mode check",
+        "Mode 0 (embedded checkpoint) is not implemented by this verifier — use Mode 1");
+    }
+
+    // 3. Reject null entry (index 0 is reserved).
     if (p.entryIndex === BigInt(0)) {
       return fail("entry index", "entry_index=0 is reserved for null_entry");
     }
@@ -358,7 +368,9 @@ export class Verifier {
     if (!cached) {
       let raw: string;
       try {
-        if (typeof fetch === "function") {
+        if (this.revocationProvider) {
+          raw = await Promise.resolve(this.revocationProvider(trust.revocationUrl));
+        } else if (typeof fetch === "function") {
           const r = await fetch(trust.revocationUrl);
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           raw = await r.text();

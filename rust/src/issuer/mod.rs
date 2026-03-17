@@ -17,6 +17,7 @@ use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine};
 use ed25519_dalek::{SigningKey, Signer as DalekSigner};
 use sha2::{Sha256, Digest};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -83,12 +84,14 @@ struct SignedCheckpoint {
 }
 
 struct State {
-    issuer_pub:    Vec<u8>,
-    origin_id:     u64,
-    witnesses:     Vec<WitnessKey>,
-    batches:       Vec<Batch>,
-    current_batch: Vec<LogEntry>,
-    latest_ckpt:   Option<SignedCheckpoint>,
+    issuer_pub:          Vec<u8>,
+    origin_id:           u64,
+    witnesses:           Vec<WitnessKey>,
+    batches:             Vec<Batch>,
+    current_batch:       Vec<LogEntry>,
+    latest_ckpt:         Option<SignedCheckpoint>,
+    revoked_indices:     HashSet<u64>,
+    latest_rev_artifact: Option<String>,
 }
 
 /// The MTA-QR issuer.
@@ -109,9 +112,11 @@ impl Issuer {
                 issuer_pub:    vec![],
                 origin_id:     0,
                 witnesses:     vec![],
-                batches:       vec![],
-                current_batch: vec![],
-                latest_ckpt:   None,
+                batches:             vec![],
+                current_batch:       vec![],
+                latest_ckpt:         None,
+                revoked_indices:     HashSet::new(),
+                latest_rev_artifact: None,
             }),
             batch_size,
         }
@@ -204,9 +209,35 @@ impl Issuer {
             "sig_alg":            self.signer.alg(),
             "witness_quorum":     state.witnesses.len(),
             "checkpoint_url":     checkpoint_url,
+            "revocation_url":     format!("{}/revoked", checkpoint_url.trim_end_matches("/checkpoint")),
             "batch_size":         self.batch_size,
             "witnesses":          witnesses,
         }))?)
+    }
+
+    /// Revoke an entry by index. Rebuilds the revocation artifact immediately.
+    /// Returns an error if `entry_index` is 0 (null entry) or not yet issued.
+    pub async fn revoke(&self, entry_index: u64) -> Result<()> {
+        let mut state = self.state.lock().await;
+        if entry_index == 0 {
+            return Err(anyhow!("entry_index=0 is the null entry and cannot be revoked"));
+        }
+        let tree_size = total_entries(&state);
+        if entry_index >= tree_size {
+            return Err(anyhow!("entry_index={entry_index} not yet issued (tree_size={tree_size})"));
+        }
+        state.revoked_indices.insert(entry_index);
+        let tree_size = state.latest_ckpt.as_ref().map(|c| c.tree_size).unwrap_or(tree_size);
+        state.latest_rev_artifact = Some(build_revocation_artifact(
+            &self.cfg.origin, tree_size, &state, self.signer.as_ref()
+        ).await?);
+        Ok(())
+    }
+
+    /// Returns the current signed revocation artifact, or `None` if not yet initialized.
+    /// Serve this at `GET /revoked`.
+    pub async fn revocation_artifact(&self) -> Option<String> {
+        self.state.lock().await.latest_rev_artifact.clone()
     }
 
     /// Returns the current signed checkpoint note (tlog-checkpoint signed-note format).
@@ -264,11 +295,65 @@ impl Issuer {
         state.latest_ckpt = Some(SignedCheckpoint {
             tree_size, root_hash: parent_root, body, issuer_sig, cosigs,
         });
+        // Build revocation artifact alongside every checkpoint.
+        state.latest_rev_artifact = Some(build_revocation_artifact(
+            &self.cfg.origin, tree_size, &state, self.signer.as_ref()
+        ).await?);
         Ok(())
     }
 }
 
 // --- protocol helpers ---
+
+async fn build_revocation_artifact(
+    origin: &str,
+    tree_size: u64,
+    state: &State,
+    signer: &dyn Signer,
+) -> Result<String> {
+    use crate::cascade::Cascade;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let mut revoked: Vec<u64> = vec![];
+    let mut valid:   Vec<u64> = vec![];
+    let mut idx: u64 = 0;
+    for entry in state.batches.iter().flat_map(|b| b.entries.iter())
+                     .chain(state.current_batch.iter()) {
+        if idx == 0 { idx += 1; continue; }
+        if state.revoked_indices.contains(&idx) {
+            revoked.push(idx);
+        } else {
+            let exp = entry_expiry_time(&entry.tbs);
+            if exp > 0 && exp < now { idx += 1; continue; }
+            valid.push(idx);
+        }
+        idx += 1;
+    }
+    let casc  = Cascade::build(&revoked, &valid)?;
+    let b64   = B64.encode(&casc.encode());
+    let body  = format!("{origin}\n{tree_size}\nmta-qr-revocation-v1\n{b64}\n");
+    let sig      = signer.sign(body.as_bytes()).await?;
+    let key_name = signer.key_name();
+    let key_id   = witness_key_id(&key_name, &state.issuer_pub);
+    let mut sig_payload = vec![0u8; 4 + sig.len()];
+    sig_payload[..4].copy_from_slice(&key_id);
+    sig_payload[4..].copy_from_slice(&sig);
+    let em_dash = "\u{2014}";
+    Ok(format!("{body}\n{em_dash} {key_name} {}\n", B64.encode(&sig_payload)))
+}
+
+fn entry_expiry_time(tbs: &[u8]) -> u64 {
+    if tbs.len() < 2 || tbs[0] != 0x01 { return 0; }
+    use ciborium::Value;
+    let Ok(Value::Map(m)) = ciborium::from_reader::<Value, _>(&tbs[1..]) else { return 0; };
+    let times = m.iter().find(|(k, _)| matches!(k,
+        Value::Integer(n) if i64::try_from(*n).ok() == Some(2)));
+    if let Some((_, Value::Array(a))) = times {
+        if let Some(ciborium::Value::Integer(n)) = a.get(1) {
+            return i64::try_from(*n).map(|i| i as u64).unwrap_or(0);
+        }
+    }
+    0
+}
 
 fn append_entry_locked(state: &mut State, tbs: Vec<u8>, batch_size: usize) -> u64 {
     let idx = total_entries(state);

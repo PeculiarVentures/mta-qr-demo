@@ -471,6 +471,13 @@ func (l *Log) LatestRevocationArtifact() []byte {
 	return l.latestRevocation
 }
 
+// IsRevoked reports whether entryIndex is in the revoked set.
+func (l *Log) IsRevoked(entryIndex uint64) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.revokedIndices[entryIndex]
+}
+
 // buildRevocationArtifactLocked builds and signs the revocation artifact.
 // Must be called with l.mu held (write or at publish time).
 func (l *Log) buildRevocationArtifactLocked() ([]byte, error) {
