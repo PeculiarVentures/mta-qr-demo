@@ -288,6 +288,95 @@ class VectorTest {
         }
     }
 
+    // --- checkpoint-body-with-revoc ---
+
+    @Test
+    void testCheckpointBodyWithRevoc() throws Exception {
+        JsonNode v = vectors.get("checkpoint-body-with-revoc");
+        assertNotNull(v, "vector checkpoint-body-with-revoc not found");
+        JsonNode inp = v.get("input");
+        JsonNode exp = v.get("expected");
+
+        byte[] rootHash = fromHex(inp.get("root_hash_hex").asText());
+        byte[] artifact = fromHex(inp.get("revoc_artifact_hex").asText());
+        byte[] body = Issuer.checkpointBodyWithRevoc(
+            inp.get("origin").asText(), inp.get("tree_size").asLong(), rootHash, artifact);
+
+        assertEquals(exp.get("body_hex").asText(), hex(body), "body_hex");
+        assertEquals(exp.get("byte_length").asInt(), body.length, "byte_length");
+
+        String bodyStr = new String(body, java.nio.charset.StandardCharsets.UTF_8);
+        String[] lines = bodyStr.stripTrailing().split("\n");
+        assertTrue(lines.length >= 4, "expected 4+ lines, got " + lines.length);
+        assertEquals(exp.get("fourth_line").asText(), lines[3], "fourth_line");
+    }
+
+    // --- mode2-payload-encode ---
+
+    @Test
+    void testMode2PayloadEncode() throws Exception {
+        JsonNode v = vectors.get("mode2-payload-encode");
+        assertNotNull(v, "vector mode2-payload-encode not found");
+        JsonNode inp = v.get("input");
+        JsonNode exp = v.get("expected");
+
+        byte[] payloadBytes = fromHex(exp.get("payload_hex").asText());
+        var decoded = com.peculiarventures.mtaqr.verifier.Verifier.decodePayloadForTest(payloadBytes);
+
+        assertEquals(2, decoded.mode(), "mode");
+        assertEquals(exp.get("proof_count").asInt(), decoded.proofHashes().size(), "proof_count");
+        assertEquals(inp.get("tree_size").asLong(), decoded.treeSize(), "tree_size");
+        assertEquals(inp.get("entry_index").asLong(), decoded.entryIndex(), "entry_index");
+    }
+
+    // --- revoc-checkpoint-commitment ---
+
+    @Test
+    void testRevocCheckpointCommitment() throws Exception {
+        JsonNode v = vectors.get("revoc-checkpoint-commitment");
+        assertNotNull(v, "vector revoc-checkpoint-commitment not found");
+        JsonNode inp = v.get("input");
+        JsonNode exp = v.get("expected");
+
+        byte[] rootHash  = fromHex(inp.get("root_hash_hex").asText());
+        byte[] artifact  = fromHex(inp.get("revoc_artifact_hex").asText());
+        byte[] seed      = fromHex(inp.get("private_seed_hex").asText());
+        var signer = LocalSigner.ed25519(seed);
+
+        byte[] plain     = Issuer.checkpointBody(inp.get("origin").asText(),
+                               inp.get("tree_size").asLong(), rootHash);
+        byte[] withRevoc = Issuer.checkpointBodyWithRevoc(inp.get("origin").asText(),
+                               inp.get("tree_size").asLong(), rootHash, artifact);
+
+        assertEquals(exp.get("plain_body_hex").asText(),      hex(plain),     "plain_body_hex");
+        assertEquals(exp.get("body_with_revoc_hex").asText(), hex(withRevoc), "body_with_revoc_hex");
+
+        byte[] plainSig = signer.sign(plain).get();
+        byte[] revocSig = signer.sign(withRevoc).get();
+
+        assertEquals(exp.get("plain_sig_hex").asText(), hex(plainSig), "plain_sig_hex");
+        assertEquals(exp.get("revoc_sig_hex").asText(), hex(revocSig), "revoc_sig_hex");
+        assertEquals(exp.get("sigs_differ").asBoolean(),
+            !java.util.Arrays.equals(plainSig, revocSig), "sigs_differ");
+    }
+
+    // --- reject-revoc-hash-mismatch ---
+
+    @Test
+    void testRejectRevocHashMismatch() throws Exception {
+        JsonNode v = vectors.get("reject-revoc-hash-mismatch");
+        assertNotNull(v, "vector reject-revoc-hash-mismatch not found");
+        JsonNode inp = v.get("input");
+        JsonNode exp = v.get("expected");
+
+        byte[] served = fromHex(inp.get("served_revoc_artifact_hex").asText());
+        java.security.MessageDigest sha = java.security.MessageDigest.getInstance("SHA-256");
+        String servedHash = hex(sha.digest(served));
+        boolean hashesMatch = servedHash.equals(inp.get("committed_hash_hex").asText());
+        assertEquals(exp.get("hashes_match").asBoolean(), hashesMatch, "hashes_match");
+    }
+
+
     private static long[] toArray(JsonNode arr) {
         long[] a = new long[arr.size()];
         for (int i = 0; i < arr.size(); i++) a[i] = arr.get(i).asLong();

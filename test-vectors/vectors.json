@@ -309,6 +309,74 @@
           }
         ]
       }
+    },
+    {
+      "description": "Checkpoint body with revoc: extension line. The 4th line is revoc:<hex(SHA-256(artifact_bytes))>\\n. Per c2sp.org/tlog-checkpoint, extension lines are part of the authenticated content \u2014 all signatures (issuer and witnesses) cover this line.",
+      "expected": {
+        "body_hex": "6578616d706c652e636f6d2f6d74612d71722f76310a330a414141414141414141414141414141414141414141414141414141414141414141414141414141414141413d0a7265766f633a396263326139313165396265643462626439333664633036373035396234303831373836363631393665353166626466623336646165383437663063643333330a",
+        "body_text": "example.com/mta-qr/v1\n3\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nrevoc:9bc2a911e9bed4bbd936dc067059b408178666196e51fbdfb36dae847f0cd333\n",
+        "byte_length": 140,
+        "fourth_line": "revoc:9bc2a911e9bed4bbd936dc067059b408178666196e51fbdfb36dae847f0cd333",
+        "revoc_hash_hex": "9bc2a911e9bed4bbd936dc067059b408178666196e51fbdfb36dae847f0cd333"
+      },
+      "id": "checkpoint-body-with-revoc",
+      "input": {
+        "origin": "example.com/mta-qr/v1",
+        "revoc_artifact_hex": "6d74612d71722d7265766f632d61727469666163742d706c616365686f6c6465720a",
+        "root_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+        "tree_size": 3
+      }
+    },
+    {
+      "description": "Mode 2 (online) payload encoding. proof_count=0, inner_count=0, no proof hashes embedded. Self-describing flag set. Verifiers MUST NOT verify Merkle inclusion for Mode 2 \u2014 proof is fetched from the tile server at scan time. The flags byte encodes version=1, self_describing=1, sig_alg=6 (Ed25519), mode=2.",
+      "expected": {
+        "flags_byte": "9a",
+        "payload_hex": "019ae06c6f59a65147a70000000000000007000000000000000500156578616d706c652e636f6d2f6d74612d71722f76310000001701a301011a67ccf0001a6bdad00002a1676b616c696365",
+        "proof_count": 0
+      },
+      "id": "mode2-payload-encode",
+      "input": {
+        "entry_index": 5,
+        "mode": 2,
+        "origin": "example.com/mta-qr/v1",
+        "origin_id_hex": "e06c6f59a65147a7",
+        "sig_alg": 6,
+        "tbs_hex": "01a301011a67ccf0001a6bdad00002a1676b616c696365",
+        "tree_size": 7
+      }
+    },
+    {
+      "description": "Issuer signature verification for plain vs revoc-extended checkpoint body. The plain 3-line body and the 4-line body produce different signatures over the same key. Mode 0 verifiers reconstruct the plain body; Mode 1/2 verifiers use the full body. Both must verify correctly against the respective signature.",
+      "expected": {
+        "body_with_revoc_hex": "6578616d706c652e636f6d2f6d74612d71722f76310a330a414141414141414141414141414141414141414141414141414141414141414141414141414141414141413d0a7265766f633a396263326139313165396265643462626439333664633036373035396234303831373836363631393665353166626466623336646165383437663063643333330a",
+        "plain_body_hex": "6578616d706c652e636f6d2f6d74612d71722f76310a330a414141414141414141414141414141414141414141414141414141414141414141414141414141414141413d0a",
+        "plain_sig_hex": "3a2164be5c7711f662358de3dc330290252ec46f4b2d78e8381a13a31af4b9dd924e6b14f23cab58a7b9194b5af8732ff6ad1572d59a24fba3c952dd4559f206",
+        "pub_key_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+        "revoc_sig_hex": "7a3f2622ffcbab8d35149e30729dc44d2f444677973b2c02e3e4c8f721c665c59d34c8fd4bf782be7aaf6409de5d49bf72ded5c74f8ce18e201f20581ec72504",
+        "sigs_differ": true
+      },
+      "id": "revoc-checkpoint-commitment",
+      "input": {
+        "origin": "example.com/mta-qr/v1",
+        "private_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+        "revoc_artifact_hex": "6d74612d71722d7265766f632d61727469666163742d706c616365686f6c6465720a",
+        "root_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+        "tree_size": 3
+      }
+    },
+    {
+      "description": "The checkpoint body contains revoc:<hash_of_artifact_A> but the verifier's cached revocation artifact is artifact_B. The SHA-256 hashes do not match. Verifiers implementing revoc integrity checking MUST detect this as a tampered artifact.",
+      "expected": {
+        "hashes_match": false,
+        "reject_reason": "revocation artifact SHA-256 does not match revoc: hash in checkpoint body"
+      },
+      "id": "reject-revoc-hash-mismatch",
+      "input": {
+        "committed_hash_hex": "9bc2a911e9bed4bbd936dc067059b408178666196e51fbdfb36dae847f0cd333",
+        "committed_revoc_artifact_hex": "6d74612d71722d7265766f632d61727469666163742d706c616365686f6c6465720a",
+        "served_hash_hex": "cd587feede43fa232b19397be80eff2d965c48e9f46bdfeb958b8f2781e76be9",
+        "served_revoc_artifact_hex": "646966666572656e742d61727469666163740a"
+      }
     }
   ]
 }

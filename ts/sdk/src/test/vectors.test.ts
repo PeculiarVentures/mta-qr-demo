@@ -9,7 +9,8 @@ import { join } from "path";
 import { createHash } from "crypto";
 import { hashLeaf, hashNode, entryHash, computeRoot, inclusionProof, verifyInclusion } from "../merkle.js";
 import { encodeTbs as encodeDataAssertion, encodeNullTbs as encodeNullEntry } from "../cbor.js";
-import { checkpointBody } from "../checkpoint.js";
+import { checkpointBody, checkpointBodyWithRevoc } from "../checkpoint.js";
+import { decodePayload } from "../payload.js";
 
 const VECTORS_PATH = join(import.meta.dirname ?? __dirname, "../../../../test-vectors/vectors.json");
 
@@ -247,4 +248,80 @@ test("reject-wrong-sig-alg", () => {
 
 // --- Summary ---
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`);
+if (failed > 0) process.exit(1);
+
+
+// --- Vector: checkpoint-body-with-revoc ---
+
+const cbwrVec = vs.get("checkpoint-body-with-revoc");
+if (cbwrVec) {
+  test("checkpoint-body-with-revoc: 4th extension line committed correctly", () => {
+    const inp = cbwrVec.input as any;
+    const exp = cbwrVec.expected as any;
+    const rootHash = fromHex(inp.root_hash_hex);
+    const artifact = fromHex(inp.revoc_artifact_hex);
+    const body = checkpointBodyWithRevoc(inp.origin, BigInt(inp.tree_size), rootHash, artifact);
+    assert(hex(body), exp.body_hex, "body hex");
+    if (body.length !== exp.byte_length) throw new Error(`byte_length: got ${body.length} want ${exp.byte_length}`);
+    const lines = new TextDecoder().decode(body).trimEnd().split("\n");
+    if (lines.length < 4) throw new Error(`expected 4 lines, got ${lines.length}`);
+    assert(lines[3], exp.fourth_line, "fourth_line");
+  });
+}
+
+// --- Vector: mode2-payload-encode ---
+
+const m2Vec = vs.get("mode2-payload-encode");
+if (m2Vec) {
+  test("mode2-payload-encode: Mode 2 payload has proof_count=0", () => {
+    const inp = m2Vec.input as any;
+    const exp = m2Vec.expected as any;
+    // Decode the canonical payload and verify proof_count and mode
+    const decoded = decodePayload(fromHex(exp.payload_hex));
+    if (decoded.mode !== 2) throw new Error(`mode: got ${decoded.mode} want 2`);
+    if (decoded.proofHashes.length !== exp.proof_count)
+      throw new Error(`proof_count: got ${decoded.proofHashes.length} want ${exp.proof_count}`);
+    if (decoded.treeSize !== BigInt(inp.tree_size))
+      throw new Error(`tree_size: got ${decoded.treeSize} want ${inp.tree_size}`);
+    if (decoded.entryIndex !== BigInt(inp.entry_index))
+      throw new Error(`entry_index: got ${decoded.entryIndex} want ${inp.entry_index}`);
+  });
+}
+
+// --- Vector: revoc-checkpoint-commitment ---
+
+const rccVec = vs.get("revoc-checkpoint-commitment");
+if (rccVec) {
+  test("revoc-checkpoint-commitment: plain vs revoc-extended body produce different sigs", () => {
+    const inp = rccVec.input as any;
+    const exp = rccVec.expected as any;
+    const rootHash = fromHex(inp.root_hash_hex);
+    const artifact = fromHex(inp.revoc_artifact_hex);
+    const plain = checkpointBody(inp.origin, BigInt(inp.tree_size), rootHash);
+    const withRevoc = checkpointBodyWithRevoc(inp.origin, BigInt(inp.tree_size), rootHash, artifact);
+    assert(hex(plain), exp.plain_body_hex, "plain_body_hex");
+    assert(hex(withRevoc), exp.body_with_revoc_hex, "body_with_revoc_hex");
+    if (exp.sigs_differ && hex(plain) === hex(withRevoc))
+      throw new Error("expected bodies to differ but they were equal");
+  });
+}
+
+// --- Vector: reject-revoc-hash-mismatch ---
+
+const rhmVec = vs.get("reject-revoc-hash-mismatch");
+if (rhmVec) {
+  test("reject-revoc-hash-mismatch: served artifact hash differs from committed hash", () => {
+    const inp = rhmVec.input as any;
+    const exp = rhmVec.expected as any;
+    const served = fromHex(inp.served_revoc_artifact_hex);
+    const servedHash = Buffer.from(
+      createHash("sha256").update(served).digest()
+    ).toString("hex");
+    const match = servedHash === inp.committed_hash_hex;
+    if (match !== exp.hashes_match)
+      throw new Error(`hashes_match: got ${match} want ${exp.hashes_match}`);
+  });
+}
+
+console.log(`\n${passed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
