@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Collections;
@@ -95,12 +96,14 @@ public final class Verifier {
     public static Builder builder() { return new Builder(); }
 
     public static final class Builder {
-        private TrustConfig         trust;
         private HttpClient          httpClient;
         private NoteProvider        noteProvider;
         private RevocationProvider  revocationProvider;
+        // Optional initial anchor — registered immediately after build() for convenience.
+        private TrustConfig         initialAnchor;
 
-        public Builder trust(TrustConfig v)       { trust = v; return this; }
+        /** Pre-register one anchor (convenience — equivalent to build().addAnchor(v)). */
+        public Builder trust(TrustConfig v)       { initialAnchor = v; return this; }
         public Builder httpClient(HttpClient v)    { httpClient = v; return this; }
         /** Inject a note provider for testing — bypasses HTTP. */
         public Builder noteProvider(NoteProvider v){ noteProvider = v; return this; }
@@ -108,14 +111,15 @@ public final class Verifier {
         public Builder revocationProvider(RevocationProvider v){ revocationProvider = v; return this; }
 
         public Verifier build() {
-            Objects.requireNonNull(trust, "trust is required");
-            return new Verifier(trust,
+            Verifier v = new Verifier(
                 httpClient != null ? httpClient :
                     HttpClient.newBuilder()
                         .connectTimeout(Duration.ofSeconds(10))
                         .build(),
                 noteProvider,
                 revocationProvider);
+            if (initialAnchor != null) v.addAnchor(initialAnchor);
+            return v;
         }
     }
 
@@ -135,8 +139,7 @@ public final class Verifier {
 
     private static final int GRACE      = 600; // seconds
 
-    private final TrustConfig          trust;
-    private final int                  batchSize;
+    private final ConcurrentHashMap<Long, TrustConfig> anchors = new ConcurrentHashMap<>();
     private final HttpClient           httpClient;
     private final NoteProvider         noteProvider;
     private final RevocationProvider   revocationProvider;
@@ -154,14 +157,29 @@ public final class Verifier {
     private record CachedRevocation(Cascade cascade, long treeSize) {}
     private final Map<String, CachedRevocation> revocCache = new java.util.concurrent.ConcurrentHashMap<>();
 
-    private Verifier(TrustConfig trust, HttpClient httpClient,
+    private Verifier(HttpClient httpClient,
                      NoteProvider noteProvider, RevocationProvider revocationProvider) {
-        this.trust               = trust;
-        this.batchSize           = trust.batchSize > 0 ? trust.batchSize : 16;
         this.httpClient          = httpClient;
         this.noteProvider        = noteProvider;
         this.revocationProvider  = revocationProvider;
     }
+
+    /**
+     * Register a trusted issuer. Returns {@code this} for chaining.
+     * @throws IllegalArgumentException on origin_id collision.
+     */
+    public Verifier addAnchor(TrustConfig trust) {
+        TrustConfig existing = anchors.get(trust.originId);
+        if (existing != null && !existing.origin.equals(trust.origin))
+            throw new IllegalArgumentException(
+                "origin_id collision: 0x" + Long.toHexString(trust.originId) +
+                " shared by \"" + existing.origin + "\" and \"" + trust.origin + "\"");
+        anchors.put(trust.originId, trust);
+        return this;
+    }
+
+    /** All registered anchors. */
+    public Collection<TrustConfig> anchors() { return anchors.values(); }
 
     /**
      * Verifies a QR code payload. Returns a future that resolves to
@@ -190,6 +208,11 @@ public final class Verifier {
 
         // Parse again for async phase
         DecodedPayload p = decodePayload(payloadBytes);
+        TrustConfig trust = anchors.get(p.originId);
+        if (trust == null)
+            return CompletableFuture.completedFuture(
+                fail(steps, "trust anchor", "no anchor for origin_id 0x" + Long.toHexString(p.originId)));
+        final TrustConfig trustFinal = trust;
         String cacheKey = trust.origin + ":" + p.treeSize;
         byte[] cached   = checkpointCache.get(cacheKey);
 
@@ -198,10 +221,10 @@ public final class Verifier {
             steps.add(new Step("checkpoint", true, "cache hit · tree_size=" + p.treeSize));
             rootHashFuture = CompletableFuture.completedFuture(cached);
         } else {
-            steps.add(new Step("checkpoint", false, "cache miss · fetching " + trust.checkpointUrl));
-            rootHashFuture = fetchAndVerifyCheckpoint(p.treeSize).thenApply(result -> {
+            steps.add(new Step("checkpoint", false, "cache miss · fetching " + trustFinal.checkpointUrl));
+            rootHashFuture = fetchAndVerifyCheckpoint(p.treeSize, trustFinal).thenApply(result -> {
                 steps.add(new Step("checkpoint fetch", true,
-                    "issuer sig ✓ · " + trust.witnessQuorum + "/" + trust.witnessQuorum +
+                    "issuer sig ✓ · " + trustFinal.witnessQuorum + "/" + trustFinal.witnessQuorum +
                     " witnesses ✓ · tree_size=" + result.treeSize));
                 checkpointCache.put(cacheKey, result.rootHash);
                 return result.rootHash;
@@ -209,7 +232,7 @@ public final class Verifier {
         }
 
         return rootHashFuture.thenApply(rootHash ->
-            runProofAndClaimsChecks(p, rootHash, steps)
+            runProofAndClaimsChecks(p, rootHash, steps, trustFinal)
         ).exceptionally(e -> {
             steps.add(new Step("checkpoint fetch", false, e.getMessage()));
             return new TraceResult(null, new VerifyFail("checkpoint fetch", e.getMessage()), steps);
@@ -233,9 +256,13 @@ public final class Verifier {
             return fail(steps, "entry index", "entry_index=0 is reserved for null_entry");
         steps.add(new Step("entry index", true, "entry_index=" + p.entryIndex + " valid"));
 
-        if (p.originId != trust.originId)
-            return fail(steps, "origin id", "payload origin_id does not match trust config");
-        steps.add(new Step("origin id", true, "matches trust config: " + trust.origin));
+        // Trust anchor lookup — multi-anchor routing by origin_id.
+        TrustConfig trust = anchors.get(p.originId);
+        if (trust == null)
+            return fail(steps, "trust anchor",
+                "no anchor for origin_id 0x" + Long.toHexString(p.originId) +
+                " — call addAnchor() with the issuer trust config first");
+        steps.add(new Step("trust anchor", true, "found: " + trust.origin));
 
         if (p.selfDescrib && p.origin != null && !p.origin.equals(trust.origin))
             return fail(steps, "origin consistency",
@@ -252,7 +279,7 @@ public final class Verifier {
 
     // --- proof + claims checks (after checkpoint) ---
 
-    private TraceResult runProofAndClaimsChecks(DecodedPayload p, byte[] rootHash, List<Step> steps) {
+    private TraceResult runProofAndClaimsChecks(DecodedPayload p, byte[] rootHash, List<Step> steps, TrustConfig trust) {
         // Entry hash
         byte[] eHash = hashLeaf(p.tbs);
         steps.add(new Step("entry hash", true, "SHA-256(0x00 || tbs) computed"));
@@ -272,6 +299,7 @@ public final class Verifier {
                 " < tree_size=" + p.treeSize + " · proof fetched at scan time"));
         } else {
             // Mode 1 (cached): two-phase tiled Merkle proof embedded.
+            int batchSize   = trust.batchSize > 0 ? trust.batchSize : 16;
             int globalIdx   = (int) p.entryIndex;
             int innerIdx    = globalIdx % batchSize;
             int batchIdx    = globalIdx / batchSize;
@@ -330,7 +358,7 @@ public final class Verifier {
 
         // 10. Revocation check — SPEC.md §Revocation.
         try {
-            String revocMsg = checkRevocation(p.entryIndex, p.treeSize).get();
+            String revocMsg = checkRevocation(p.entryIndex, p.treeSize, trust).get();
             steps.add(new Step("revocation check", true, revocMsg));
         } catch (Exception e) {
             String reason = e.getCause() != null ? e.getCause().getMessage() : e.getMessage();
@@ -358,7 +386,7 @@ public final class Verifier {
 
     private static final long STALE_THRESHOLD = 32L;
 
-    private CompletableFuture<String> checkRevocation(long entryIndex, long checkpointTreeSize) {
+    private CompletableFuture<String> checkRevocation(long entryIndex, long checkpointTreeSize, TrustConfig trust) {
         if (trust.revocationUrl == null || trust.revocationUrl.isEmpty())
             return CompletableFuture.completedFuture(
                 "skipped — no revocation_url in trust config (fail-open)");
@@ -370,7 +398,7 @@ public final class Verifier {
 
         final CachedRevocation fresh = cached;
         if (fresh == null) {
-            return fetchRevocationArtifact().thenApply(art -> {
+            return fetchRevocationArtifact(trust).thenApply(art -> {
                 revocCache.put(trust.origin, art);
                 return queryRevocation(art, entryIndex);
             });
@@ -388,11 +416,12 @@ public final class Verifier {
             art.treeSize() + ")";
     }
 
-    private CompletableFuture<CachedRevocation> fetchRevocationArtifact() {
+    private CompletableFuture<CachedRevocation> fetchRevocationArtifact(TrustConfig trust) {
         String url = trust.revocationUrl;
+        final TrustConfig t = trust; // effectively final for lambda capture
         if (revocationProvider != null)
             return revocationProvider.fetchArtifact(url)
-                .thenApply(this::parseRevocationArtifact);
+                .thenApply(body -> this.parseRevocationArtifact(body, t));
         HttpRequest req = HttpRequest.newBuilder()
             .uri(URI.create(url))
             .timeout(Duration.ofSeconds(10))
@@ -403,11 +432,11 @@ public final class Verifier {
                     throw new IllegalStateException("GET " + url + " → " + resp.statusCode());
                 if (resp.body().length() > 64 * 1024)
                     throw new IllegalStateException("revocation artifact too large");
-                return parseRevocationArtifact(resp.body());
+                return parseRevocationArtifact(resp.body(), trust);
             });
     }
 
-    private CachedRevocation parseRevocationArtifact(String text) {
+    private CachedRevocation parseRevocationArtifact(String text, TrustConfig trust) {
         int sep = text.indexOf("\n\n");
         if (sep < 0) throw new IllegalArgumentException("revocation artifact: missing blank line");
         String bodyPart = text.substring(0, sep);
@@ -448,7 +477,7 @@ public final class Verifier {
 
     private record CheckpointResult(byte[] rootHash, long treeSize) {}
 
-    private CompletableFuture<CheckpointResult> fetchAndVerifyCheckpoint(long requiredSize) {
+    private CompletableFuture<CheckpointResult> fetchAndVerifyCheckpoint(long requiredSize, TrustConfig trust) {
         CompletableFuture<String> noteFuture;
         if (noteProvider != null) {
             noteFuture = noteProvider.fetchNote(trust.checkpointUrl);
@@ -467,10 +496,10 @@ public final class Verifier {
                     return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
                 });
         }
-        return noteFuture.thenApply(note -> verifyNote(note, requiredSize));
+        return noteFuture.thenApply(note -> verifyNote(note, requiredSize, trust));
     }
 
-    private CheckpointResult verifyNote(String note, long requiredSize) {
+    private CheckpointResult verifyNote(String note, long requiredSize, TrustConfig trust) {
         int blankIdx = note.indexOf("\n\n");
         if (blankIdx < 0) throw new RuntimeException("note missing blank-line separator");
         byte[] body = (note.substring(0, blankIdx) + "\n").getBytes(StandardCharsets.UTF_8);

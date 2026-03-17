@@ -318,12 +318,14 @@ The SDK bundle is compiled from `ts/sdk/src/browser-bundle.ts` by esbuild. CI re
 
 ## Design decisions
 
-**Multi-anchor (Go HTTP service) vs single-anchor (SDK libraries).**  
-The Go and TypeScript **HTTP verifier services** (`go/verifier/`, `ts/verifier/`) hold a map of trust anchors keyed by `origin_id` and route incoming payloads to the matching anchor. A single running verifier instance can verify payloads from multiple issuers simultaneously. The `POST /load-trust-config` endpoint registers anchors at runtime.
+**Multi-anchor Verifier across all implementations.**  
+All Verifier implementations — HTTP services and SDK libraries — are multi-anchor. A single `Verifier` instance holds a map of trust anchors keyed by `origin_id` (the 8-byte prefix of SHA-256(origin)) and routes each incoming payload to the correct anchor automatically.
 
-The **SDK libraries** (Go `go/verifier/verify/`, TypeScript `ts/sdk/src/verifier.ts`, Rust `rust/src/verifier/`, Java `java/.../verifier/`) are single-anchor: each `Verifier` instance is bound to exactly one `TrustConfig` at construction time. Multi-issuer verification requires one `Verifier` instance per issuer. This is the conventional SDK pattern — it keeps the interface simple and avoids shared mutable state between issuers.
+The Go and TypeScript **HTTP verifier services** (`go/verifier/`, `ts/verifier/`) register anchors at runtime via `POST /load-trust-config`.
 
-This is an intentional design difference, not an oversight. The HTTP service layer wraps the SDK verifier in a routing layer; the SDK itself stays simple. If an SDK consumer needs multi-anchor routing, they manage a `Map<originId, Verifier>` themselves.
+The **SDK libraries** (Go `go/verifier/verify/`, TypeScript `ts/sdk/src/verifier.ts`, Rust `rust/src/verifier/`, Java `java/.../verifier/`) expose `addAnchor(trust)` (Go: `AddAnchor`, Rust: `add_anchor`, Java: `addAnchor`, TS: `addAnchor`). For backwards compatibility, the TS SDK and Java Builder also accept a `trust` parameter at construction time, which is equivalent to calling `addAnchor()` immediately after.
+
+An origin_id collision — two distinct origin strings whose first 8 SHA-256 bytes are identical — is detected at `addAnchor()` time and returned as an error, preventing ambiguous routing.
 
 
 **Why a tiled two-level Merkle tree?**  

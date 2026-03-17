@@ -73,31 +73,52 @@ struct CachedRevocation {
 
 /// The MTA-QR verifier.
 pub struct Verifier {
-    trust:              TrustConfig,
-    note_provider:      Option<NoteProvider>,
+    anchors:             HashMap<u64, TrustConfig>,
+    note_provider:       Option<NoteProvider>,
     revocation_provider: Option<RevocationProvider>,
-    cache:              Mutex<(VecDeque<String>, HashMap<String, Vec<u8>>)>,
-    revoc_cache:        Mutex<HashMap<String, CachedRevocation>>,
+    cache:               Mutex<(VecDeque<String>, HashMap<String, Vec<u8>>)>,
+    revoc_cache:         Mutex<HashMap<String, CachedRevocation>>,
 }
 
 impl Verifier {
     /// Create a Verifier from a trust config.
-    pub fn new(trust: TrustConfig) -> Self {
-        Self { trust, note_provider: None, revocation_provider: None, cache: Mutex::new((VecDeque::new(), HashMap::new())), revoc_cache: Mutex::new(HashMap::new()) }
-    }
-
-    /// Create a Verifier that fetches checkpoint notes via `provider`.
-    /// Used in tests to avoid HTTP.
-    pub fn with_note_provider(trust: TrustConfig, provider: NoteProvider) -> Self {
-        Self { trust, note_provider: Some(provider), revocation_provider: None, cache: Mutex::new((VecDeque::new(), HashMap::new())), revoc_cache: Mutex::new(HashMap::new()) }
-    }
-
-    /// Create a Verifier with a revocation artifact provider (for tests — bypasses HTTP).
-    pub fn with_revocation_provider(trust: TrustConfig, note: NoteProvider, revoc: RevocationProvider) -> Self {
-        Self { trust, note_provider: Some(note), revocation_provider: Some(revoc),
+    /// Create an empty multi-anchor Verifier.
+    pub fn new() -> Self {
+        Self { anchors: HashMap::new(), note_provider: None, revocation_provider: None,
                cache: Mutex::new((VecDeque::new(), HashMap::new())),
                revoc_cache: Mutex::new(HashMap::new()) }
     }
+
+    /// Create a Verifier with a note provider (for tests — bypasses HTTP).
+    pub fn with_note_provider(provider: NoteProvider) -> Self {
+        let mut v = Self::new();
+        v.note_provider = Some(provider);
+        v
+    }
+
+    /// Create a Verifier with note and revocation providers (for tests).
+    pub fn with_revocation_provider(note: NoteProvider, revoc: RevocationProvider) -> Self {
+        let mut v = Self::new();
+        v.note_provider       = Some(note);
+        v.revocation_provider = Some(revoc);
+        v
+    }
+
+    /// Register a trusted issuer. Returns `&mut self` for chaining.
+    /// Returns an error if the 8-byte origin_id collides with a different origin.
+    pub fn add_anchor(&mut self, trust: TrustConfig) -> anyhow::Result<&mut Self> {
+        if let Some(existing) = self.anchors.get(&trust.origin_id) {
+            if existing.origin != trust.origin {
+                return Err(anyhow!("origin_id collision: 0x{:016x} shared by {:?} and {:?}",
+                    trust.origin_id, existing.origin, trust.origin));
+            }
+        }
+        self.anchors.insert(trust.origin_id, trust);
+        Ok(self)
+    }
+
+    /// All registered anchors.
+    pub fn anchors(&self) -> Vec<&TrustConfig> { self.anchors.values().collect() }
 
     /// Verify a QR code payload. Returns `Ok(VerifyOk)` or `Err(VerifyFail)`.
     pub async fn verify(&self, payload: &[u8]) -> Result<VerifyOk, VerifyFail> {
@@ -148,40 +169,42 @@ impl Verifier {
                 "Mode 0 (embedded checkpoint) is not implemented by this verifier — use Mode 1");
         }
 
-        // 4. Origin ID
-        if p.origin_id != self.trust.origin_id {
-            fail!("origin id", format!("payload origin_id 0x{:016x} does not match trust config", p.origin_id));
-        }
-        add!(true, "origin id", format!("matches trust config: {:?}", self.trust.origin));
+        // 4. Trust anchor lookup — multi-anchor routing by origin_id.
+        let trust = match self.anchors.get(&p.origin_id) {
+            Some(t) => t,
+            None => fail!("trust anchor", format!(
+                "no anchor for origin_id 0x{:016x} — call add_anchor() first", p.origin_id)),
+        };
+        add!(true, "trust anchor", format!("found: {:?}", trust.origin));
 
         // 5. Self-describing origin consistency
         if let Some(ref env_origin) = p.origin {
-            if env_origin != &self.trust.origin {
-                fail!("origin consistency", format!("envelope {:?} != trust config {:?}", env_origin, self.trust.origin));
+            if env_origin != &trust.origin {
+                fail!("origin consistency", format!("envelope {:?} != trust config {:?}", env_origin, trust.origin));
             }
             add!(true, "origin consistency", "envelope matches trust config");
         }
 
         // 6. Algorithm binding
-        if p.sig_alg != self.trust.sig_alg {
-            fail!("algorithm binding", format!("payload sig_alg={} but trust config requires {}", p.sig_alg, self.trust.sig_alg));
+        if p.sig_alg != trust.sig_alg {
+            fail!("algorithm binding", format!("payload sig_alg={} but trust config requires {}", p.sig_alg, trust.sig_alg));
         }
         add!(true, "algorithm binding", format!("sig_alg={} matches trust config", p.sig_alg));
 
         // 7. Checkpoint resolution
-        let cache_key = format!("{}:{}", self.trust.origin, p.tree_size);
+        let cache_key = format!("{}:{}", trust.origin, p.tree_size);
         let cached_root = self.cache.lock().unwrap().1.get(&cache_key).cloned();
 
         let root_hash = if let Some(r) = cached_root {
             add!(true, "checkpoint", format!("cache hit · tree_size={}", p.tree_size));
             r
         } else {
-            add!(false, "checkpoint", format!("cache miss · fetching {}", self.trust.checkpoint_url));
-            match self.fetch_and_verify_checkpoint(p.tree_size).await {
+            add!(false, "checkpoint", format!("cache miss · fetching {}", trust.checkpoint_url));
+            match self.fetch_and_verify_checkpoint(p.tree_size, trust).await {
                 Ok((root, fetched_size)) => {
                     add!(true, "checkpoint fetch", format!(
                         "issuer sig ✓ · {}/{} witnesses ✓ · tree_size={}",
-                        self.trust.witness_quorum, self.trust.witness_quorum, fetched_size));
+                        trust.witness_quorum, trust.witness_quorum, fetched_size));
                     {
                         const MAX_CACHE_ENTRIES: usize = 1000;
                         let mut guard = self.cache.lock().unwrap();
@@ -223,7 +246,7 @@ impl Verifier {
         } else {
             // Mode 1 (cached): two-phase tiled Merkle proof embedded.
             let global_idx   = p.entry_index as usize;
-            let batch_size   = self.trust.batch_size;
+            let batch_size   = trust.batch_size;
             let inner_idx    = global_idx % batch_size;
             let batch_idx    = global_idx / batch_size;
             let num_batches  = (p.tree_size as usize + batch_size - 1) / batch_size;
@@ -260,7 +283,7 @@ impl Verifier {
 
         // 10. Revocation check — SPEC.md §Revocation.
         {
-            let revoc = self.check_revocation(p.entry_index, p.tree_size).await;
+            let revoc = self.check_revocation(p.entry_index, p.tree_size, trust).await;
             match revoc {
                 Ok(ref msg)  => { add!(true,  "revocation check", msg.as_str()); }
                 Err(ref msg) => { fail!("revocation check", msg.as_str()); }
@@ -276,14 +299,14 @@ impl Verifier {
         add!(true, "expiry", format!("valid · {}s remaining", expires_at as i64 - now as i64));
 
         add!(true, "complete", format!(
-            "all checks passed · entry_index={} · origin={:?}", p.entry_index, self.trust.origin));
+            "all checks passed · entry_index={} · origin={:?}", p.entry_index, trust.origin));
 
         TraceResult {
             ok: Some(VerifyOk {
                 mode:        p.mode,
                 entry_index: p.entry_index,
                 tree_size:   p.tree_size,
-                origin:      self.trust.origin.clone(),
+                origin:      trust.origin.clone(),
                 schema_id,
                 issued_at,
                 expires_at,
@@ -294,9 +317,9 @@ impl Verifier {
         }
     }
 
-    async fn fetch_and_verify_checkpoint(&self, required_size: u64) -> Result<(Vec<u8>, u64)> {
+    async fn fetch_and_verify_checkpoint(&self, required_size: u64, trust: &TrustConfig) -> Result<(Vec<u8>, u64)> {
         let note = if let Some(ref provider) = self.note_provider {
-            provider(&self.trust.checkpoint_url)?
+            provider(&trust.checkpoint_url)?
         } else {
             #[cfg(feature = "goodkey")]
             {
@@ -304,8 +327,8 @@ impl Verifier {
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(10))
                     .build()?;
-                let resp = client.get(&self.trust.checkpoint_url).send().await
-                    .map_err(|e| anyhow!("GET {}: {e}", self.trust.checkpoint_url))?;
+                let resp = client.get(&trust.checkpoint_url).send().await
+                    .map_err(|e| anyhow!("GET {}: {e}", trust.checkpoint_url))?;
                 // Cap to 64 KB — a valid checkpoint is ~200 bytes.
                 // A malicious issuer serving a gigabyte response would otherwise
                 // exhaust verifier memory.
@@ -324,10 +347,10 @@ impl Verifier {
                 ));
             }
         };
-        self.verify_note(&note, required_size)
+        self.verify_note(&note, required_size, trust)
     }
 
-    fn verify_note(&self, note: &str, required_size: u64) -> Result<(Vec<u8>, u64)> {
+    fn verify_note(&self, note: &str, required_size: u64, trust: &TrustConfig) -> Result<(Vec<u8>, u64)> {
         let blank = note.find("\n\n")
             .ok_or_else(|| anyhow!("note missing blank-line separator"))?;
         let body: Vec<u8> = (note[..blank].to_string() + "\n").into_bytes();
@@ -342,7 +365,7 @@ impl Verifier {
         let tree_size: u64 = lines[1].parse()?;
         let root_hash    = B64.decode(lines[2])?;
 
-        if note_origin != self.trust.origin {
+        if note_origin != trust.origin {
             return Err(anyhow!("origin mismatch: {:?}", note_origin));
         }
         if tree_size < required_size {
@@ -354,12 +377,12 @@ impl Verifier {
         // Issuer sig — dispatch by key name, skip 4-byte key_hash prefix
         let mut issuer_ok = false;
         for line in &sig_lines {
-            if !line.contains(&self.trust.issuer_key_name) { continue; }
+            if !line.contains(&trust.issuer_key_name) { continue; }
             if let Some(raw) = last_field_base64(line) {
                 if raw.len() < 4 { continue; }
                 // Per c2sp.org/signed-note: first 4 bytes are key_hash; rest is sig.
                 let raw_sig = &raw[4..];
-                if verify(self.trust.sig_alg, &body, raw_sig, &self.trust.issuer_pub_key) {
+                if verify(trust.sig_alg, &body, raw_sig, &trust.issuer_pub_key) {
                     issuer_ok = true;
                     break;
                 }
@@ -378,7 +401,7 @@ impl Verifier {
                 let ts = u64::from_be_bytes(raw[4..12].try_into().unwrap());
                 let wsig = &raw[12..76];
                 let msg = cosignature_message(&body, ts);
-                for w in &self.trust.witnesses {
+                for w in &trust.witnesses {
                     if w.key_id != key_hash { continue; }
                     if verify(ALG_ED25519, &msg, wsig, &w.pub_key) {
                         verified.insert(w.name.clone());
@@ -386,15 +409,15 @@ impl Verifier {
                 }
             }
         }
-        if verified.len() < self.trust.witness_quorum {
-            return Err(anyhow!("witness quorum not met: {}/{}", verified.len(), self.trust.witness_quorum));
+        if verified.len() < trust.witness_quorum {
+            return Err(anyhow!("witness quorum not met: {}/{}", verified.len(), trust.witness_quorum));
         }
 
         Ok((root_hash, tree_size))
     }
     /// Revocation check — SPEC.md §Revocation — Verifier Behavior.
-    async fn check_revocation(&self, entry_index: u64, checkpoint_tree_size: u64) -> Result<String, String> {
-        if self.trust.revocation_url.is_empty() {
+    async fn check_revocation(&self, entry_index: u64, checkpoint_tree_size: u64, trust: &TrustConfig) -> Result<String, String> {
+        if trust.revocation_url.is_empty() {
             return Ok("skipped — no revocation_url in trust config (fail-open)".into());
         }
 
@@ -403,7 +426,7 @@ impl Verifier {
         // Check cache (and staleness).
         let cached_opt = {
             let cache = self.revoc_cache.lock().unwrap();
-            cache.get(&self.trust.origin).map(|c| (c.tree_size, c.cascade.query(entry_index)))
+            cache.get(&trust.origin).map(|c| (c.tree_size, c.cascade.query(entry_index)))
         };
 
         // Attempt to use cache if not stale.
@@ -422,7 +445,7 @@ impl Verifier {
         }
 
         // Cache miss or stale — fetch.
-        let artifact = self.fetch_revocation_artifact().await
+        let artifact = self.fetch_revocation_artifact(trust).await
             .map_err(|e| format!("no revocation artifact (fail-closed): {e}"))?;
 
         let result = if artifact.cascade.query(entry_index) {
@@ -439,17 +462,17 @@ impl Verifier {
             ));
         }
 
-        self.revoc_cache.lock().unwrap().insert(self.trust.origin.clone(), artifact);
+        self.revoc_cache.lock().unwrap().insert(trust.origin.clone(), artifact);
         result
     }
 
     /// Fetch and parse the revocation artifact from revocation_url.
-    async fn fetch_revocation_artifact(&self) -> Result<CachedRevocation> {
-        let url = &self.trust.revocation_url;
+    async fn fetch_revocation_artifact(&self, trust: &TrustConfig) -> Result<CachedRevocation> {
+        let url = &trust.revocation_url;
         // Use injected provider if available (tests bypass HTTP this way).
         if let Some(ref provider) = self.revocation_provider {
             let raw = provider(url)?;
-            return self.parse_revocation_artifact(&raw);
+            return self.parse_revocation_artifact(&raw, trust);
         }
         let raw = {
             #[cfg(feature = "goodkey")]
@@ -468,11 +491,11 @@ impl Verifier {
             #[cfg(not(feature = "goodkey"))]
             { return Err(anyhow!("HTTP not available without 'goodkey' feature")); }
         };
-        self.parse_revocation_artifact(&raw)
+        self.parse_revocation_artifact(&raw, trust)
     }
 
     /// Parse and verify a revocation artifact string.
-    fn parse_revocation_artifact(&self, text: &str) -> Result<CachedRevocation> {
+    fn parse_revocation_artifact(&self, text: &str, trust: &TrustConfig) -> Result<CachedRevocation> {
         let (body_part, sig_part) = text.split_once("\n\n")
             .ok_or_else(|| anyhow!("revocation artifact: missing blank line"))?;
         let body = format!("{body_part}\n");
@@ -483,7 +506,7 @@ impl Verifier {
         let (origin, tree_size_str, artifact_type, casc_b64) =
             (lines[0], lines[1], lines[2], lines[3]);
 
-        if origin != self.trust.origin {
+        if origin != trust.origin {
             return Err(anyhow!("revocation artifact: origin mismatch"));
         }
         if artifact_type != "mta-qr-revocation-v1" {
@@ -500,14 +523,14 @@ impl Verifier {
 
         // Signature verification — algorithm binding per SPEC.md.
         let body_bytes = body.as_bytes();
-        let key_prefix = format!("— {} ", self.trust.issuer_key_name);
+        let key_prefix = format!("— {} ", trust.issuer_key_name);
         let mut sig_ok = false;
         for line in sig_part.lines() {
             if !line.starts_with(&key_prefix) { continue; }
             if let Some(raw) = last_field_base64(line) {
                 if raw.len() >= 4 {
                     let sig = &raw[4..]; // strip key hash
-                    if verify(self.trust.sig_alg, body_bytes, sig, &self.trust.issuer_pub_key) {
+                    if verify(trust.sig_alg, body_bytes, sig, &trust.issuer_pub_key) {
                         sig_ok = true;
                         break;
                     }
