@@ -102,7 +102,9 @@ Each verifier asserts the `mode` field on the result matches the issued payload 
 
 MTA-QR has three payload modes defined in the protocol, all implemented across all four SDKs.
 
-**Mode 0 — embedded (no checkpoint fetch).** The payload includes the inclusion proof and a compact cosigned checkpoint (root hash + issuer signature + witness cosignatures). No network access at scan time — the checkpoint is verified from the embedded signatures rather than fetched. A trust configuration (issuer and witness public keys) must still be pre-loaded; Mode 0 eliminates the checkpoint fetch, not the trust distribution step. Largest payload size (~440 bytes for Ed25519). Implemented in all four SDKs.
+**Mode 0 — embedded (no checkpoint fetch).** The payload includes the inclusion proof and a compact cosigned checkpoint (root hash + issuer signature + witness cosignatures). No network access at scan time — the checkpoint is verified from the embedded signatures rather than fetched. A trust configuration (issuer and witness public keys) must still be pre-loaded; Mode 0 eliminates the checkpoint fetch, not the trust distribution step. Implemented in all four SDKs.
+
+Payload sizes: ~440 bytes (Ed25519, 2 witnesses), ~700 bytes (ECDSA P-256), ~1,302 bytes (FN-DSA-512 — marginal, controlled conditions required). No currently standardized post-quantum scheme fits comfortably in a Mode 0 payload. The NIST additional-signatures competition has several candidates (SQIsign, SNOVA, MAYO, HAWK) that would fit once standardized. See SPEC.md §Mode 0 and Future PQC Algorithms.
 
 **Mode 1 — cached checkpoint (offline after prefetch).** The payload includes the inclusion proof but not the checkpoint. The verifier resolves the checkpoint from its local cache; on cache miss it fetches once and caches the result. This is the default mode and the right choice for most deployments.
 
