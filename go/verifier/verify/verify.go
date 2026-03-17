@@ -77,9 +77,10 @@ const maxCacheEntries = 1000
 
 // CachedRevocation holds a locally cached, verified revocation artifact.
 type CachedRevocation struct {
-	Cascade     *cascade.Cascade
-	TreeSize    uint64
-	CascadeHash [32]byte // SHA-256 of raw cascade bytes for in-memory integrity
+	Cascade      *cascade.Cascade
+	TreeSize     uint64
+	CascadeHash  [32]byte // SHA-256 of raw cascade bytes for in-memory integrity
+	ArtifactHash [32]byte // SHA-256 of complete raw artifact bytes (body + sig line)
 }
 
 // Verifier holds trust anchors, a checkpoint cache, and a revocation cache.
@@ -191,6 +192,7 @@ func (v *Verifier) Verify(payloadBytes []byte) *Result {
 
 	// 6. Checkpoint resolution — method depends on mode.
 	var rootHash []byte
+	var checkpointRevocHash []byte // revoc: hash from checkpoint body; nil if not present
 	if p.Mode == payload.ModeEmbedded {
 		// Mode 0: verify the checkpoint embedded directly in the payload.
 		// No network access — the issuer sig and witness cosigs are in the payload bytes.
@@ -215,10 +217,11 @@ func (v *Verifier) Verify(payloadBytes []byte) *Result {
 			rootHash = cached.RootHash
 		} else {
 			add("Checkpoint cache", false, fmt.Sprintf("cache miss · tree_size=%d · fetching from %s", p.TreeSize, anchor.CheckpointURL))
-			fetchedRoot, fetchedSize, ferr := v.fetchAndVerify(anchor, p.TreeSize)
+			fetchedRoot, fetchedSize, fetchedRevocHash, ferr := v.fetchAndVerify(anchor, p.TreeSize)
 			if ferr != nil {
 				return fail("Checkpoint fetch+verify", ferr.Error())
 			}
+			checkpointRevocHash = fetchedRevocHash
 			add("Checkpoint fetch+verify", true, fmt.Sprintf("issuer sig ✓ · %d/%d witnesses ✓ · tree_size=%d",
 				anchor.WitnessQuorum, anchor.WitnessQuorum, fetchedSize))
 			rootHash = fetchedRoot
@@ -324,7 +327,7 @@ func (v *Verifier) Verify(payloadBytes []byte) *Result {
 	res.SchemaID = entry.SchemaID
 
 	// 10. Revocation check — SPEC.md §Revocation — Verifier Behavior.
-	if err := v.checkRevocation(anchor, p.EntryIndex, p.TreeSize, add); err != nil {
+	if err := v.checkRevocation(anchor, p.EntryIndex, p.TreeSize, checkpointRevocHash, add); err != nil {
 		return fail("Revocation check", err.Error())
 	}
 
@@ -393,17 +396,17 @@ func (v *Verifier) verifyEmbeddedCheckpoint(p *payload.Payload, anchor *TrustAnc
 }
 
 
-func (v *Verifier) fetchAndVerify(anchor *TrustAnchor, requiredSize uint64) ([]byte, uint64, error) {
+func (v *Verifier) fetchAndVerify(anchor *TrustAnchor, requiredSize uint64) (rootHash []byte, treeSize uint64, revocHash []byte, err error) {
 	resp, err := v.httpClient.Get(anchor.CheckpointURL)
 	if err != nil {
-		return nil, 0, fmt.Errorf("GET %s: %w", anchor.CheckpointURL, err)
+		return nil, 0, nil, fmt.Errorf("GET %s: %w", anchor.CheckpointURL, err)
 	}
 	defer resp.Body.Close()
 	// Limit to 64 KB — a valid checkpoint is ~200 bytes.
 	const maxCheckpointBytes = 64 * 1024
 	buf, err := io.ReadAll(io.LimitReader(resp.Body, maxCheckpointBytes))
 	if err != nil {
-		return nil, 0, fmt.Errorf("read checkpoint body: %w", err)
+		return nil, 0, nil, fmt.Errorf("read checkpoint body: %w", err)
 	}
 	return verifyNote(string(buf), anchor, requiredSize)
 }
@@ -413,23 +416,23 @@ func (v *Verifier) fetchAndVerify(anchor *TrustAnchor, requiredSize uint64) ([]b
 // against the anchor's known issuer key name — not by byte length, which is
 // ambiguous when multiple algorithms share the same sig size (Ed25519 and
 // ECDSA-P256 are both 64 bytes raw).
-func verifyNote(note string, anchor *TrustAnchor, requiredSize uint64) ([]byte, uint64, error) {
+func verifyNote(note string, anchor *TrustAnchor, requiredSize uint64) (rootHash []byte, treeSize uint64, revocHash []byte, err error) {
 	blankIdx := strings.Index(note, "\n\n")
 	if blankIdx < 0 {
-		return nil, 0, fmt.Errorf("note missing blank-line separator between body and signatures")
+		return nil, 0, nil, fmt.Errorf("note missing blank-line separator between body and signatures")
 	}
 	body := []byte(note[:blankIdx] + "\n")
 	rest := note[blankIdx+2:]
 
 	origin, treeSize, rootHash, err := checkpoint.ParseBody(body)
 	if err != nil {
-		return nil, 0, fmt.Errorf("parse body: %w", err)
+		return nil, 0, nil, fmt.Errorf("parse body: %w", err)
 	}
 	if origin != anchor.Origin {
-		return nil, 0, fmt.Errorf("origin mismatch: got %q want %q", origin, anchor.Origin)
+		return nil, 0, nil, fmt.Errorf("origin mismatch: got %q want %q", origin, anchor.Origin)
 	}
 	if treeSize < requiredSize {
-		return nil, 0, fmt.Errorf("tree_size %d < required %d", treeSize, requiredSize)
+		return nil, 0, nil, fmt.Errorf("tree_size %d < required %d", treeSize, requiredSize)
 	}
 
 	var sigLines []string
@@ -462,7 +465,7 @@ func verifyNote(note string, anchor *TrustAnchor, requiredSize uint64) ([]byte, 
 		}
 	}
 	if !issuerOK {
-		return nil, 0, fmt.Errorf("%s issuer signature not found or invalid", signing.SigAlgName(anchor.SigAlg))
+		return nil, 0, nil, fmt.Errorf("%s issuer signature not found or invalid", signing.SigAlgName(anchor.SigAlg))
 	}
 
 	// Verify witness cosignatures. Per c2sp.org/tlog-cosignature, witness keys
@@ -495,23 +498,21 @@ func verifyNote(note string, anchor *TrustAnchor, requiredSize uint64) ([]byte, 
 		}
 	}
 	if len(verifiedWitnesses) < anchor.WitnessQuorum {
-		return nil, 0, fmt.Errorf("witness quorum not met: %d/%d verified", len(verifiedWitnesses), anchor.WitnessQuorum)
+		return nil, 0, nil, fmt.Errorf("witness quorum not met: %d/%d verified", len(verifiedWitnesses), anchor.WitnessQuorum)
 	}
 
 	// Extract optional revoc: extension line from the checkpoint body.
 	// If present, callers can verify their cached revocation artifact matches.
-	var revocHash []byte
 	for _, line := range strings.Split(string(body), "\n") {
 		if strings.HasPrefix(line, "revoc:") {
-			h, err := hex.DecodeString(strings.TrimPrefix(line, "revoc:"))
-			if err == nil && len(h) == 32 {
+			h, e2 := hex.DecodeString(strings.TrimPrefix(line, "revoc:"))
+			if e2 == nil && len(h) == 32 {
 				revocHash = h
 			}
 			break
 		}
 	}
-	_ = revocHash // available for callers that implement full revoc auditability
-	return rootHash, treeSize, nil
+	return rootHash, treeSize, revocHash, nil
 }
 
 func lastFieldBase64(line string) ([]byte, error) {
@@ -541,7 +542,7 @@ func entryTypeName(t byte) string {
 // checkRevocation implements SPEC.md §Revocation — Verifier Behavior.
 // It checks the revocation cache, fetches if stale or missing, and queries.
 // Returns nil if the entry is not revoked, or an error if revoked or check failed.
-func (v *Verifier) checkRevocation(anchor *TrustAnchor, entryIndex, checkpointTreeSize uint64, add addFn) error {
+func (v *Verifier) checkRevocation(anchor *TrustAnchor, entryIndex, checkpointTreeSize uint64, committedRevocHash []byte, add addFn) error {
 	if anchor.RevocationURL == "" {
 		add("Revocation check", true, "skipped — no revocation_url in trust config (fail-open)")
 		return nil
@@ -570,6 +571,21 @@ func (v *Verifier) checkRevocation(anchor *TrustAnchor, entryIndex, checkpointTr
 		v.revocCache[anchor.Origin] = art
 		v.mu.Unlock()
 		cached = art
+	}
+
+	// Revocation artifact integrity: if the checkpoint body committed a revoc: hash,
+	// verify it matches the artifact — but only when the artifact is from the same
+	// point in time as the checkpoint (artifact.TreeSize < checkpoint.TreeSize means
+	// the artifact predates the checkpoint and may have been updated legitimately).
+	if len(committedRevocHash) == 32 && cached.TreeSize < checkpointTreeSize {
+		if cached.ArtifactHash != ([32]byte)(committedRevocHash) {
+			add("Revocation check", false, fmt.Sprintf(
+				"artifact hash mismatch: checkpoint committed %x but served artifact hashes to %x",
+				committedRevocHash, cached.ArtifactHash[:]))
+			return fmt.Errorf("revocation artifact hash mismatch: committed %x, got %x",
+				committedRevocHash, cached.ArtifactHash[:])
+		}
+		add("Revocation check", true, fmt.Sprintf("artifact hash matches committed revoc: %x", committedRevocHash[:8]))
 	}
 
 	// Coverage check.
@@ -658,10 +674,12 @@ func parseRevocationArtifact(anchor *TrustAnchor, raw []byte) (*CachedRevocation
 	}
 
 	cascHash := sha256.Sum256(cascadeBytes)
+	artHash  := sha256.Sum256(raw)
 	return &CachedRevocation{
-		Cascade:     casc,
-		TreeSize:    treeSize,
-		CascadeHash: cascHash,
+		Cascade:      casc,
+		TreeSize:     treeSize,
+		CascadeHash:  cascHash,
+		ArtifactHash: artHash,
 	}, nil
 }
 

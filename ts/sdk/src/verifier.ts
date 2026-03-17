@@ -17,6 +17,7 @@
  */
 
 import { TrustConfig } from "./trust.js";
+import { createHash } from 'node:crypto';
 import { decodePayload, MODE_ONLINE } from "./payload.js";
 import { decodeTbs, ENTRY_TYPE_DATA } from "./cbor.js";
 import { entryHash, verifyInclusion, computeRootFromProof } from "./merkle.js";
@@ -86,7 +87,7 @@ export class Verifier {
   private readonly revocationProvider:  RevocationProvider | undefined;
   private static readonly MAX_CACHE_ENTRIES = 1000;
   private readonly cache = new Map<string, CachedCheckpoint>();
-  private readonly revocCache = new Map<string, { cascade: Cascade; treeSize: bigint }>();
+  private readonly revocCache = new Map<string, { cascade: Cascade; treeSize: bigint; artifactHash: string }>();
 
   /**
    * @param trust       Trust configuration from the issuer.
@@ -165,7 +166,7 @@ export class Verifier {
       if (!emb.ok) return fail("embedded checkpoint", emb.reason);
       add("embedded checkpoint", true,
         `issuer sig ✓ · ${trust0.witnessQuorum}/${trust0.witnessQuorum} witnesses ✓`);
-      return this.runAfterRootHash(p, emb.rootHash, trust0, steps, add, fail, ok);
+      return this.runAfterRootHash(p, emb.rootHash, trust0, steps, add, fail, ok, null);
     }
 
     // 3. Reject null entry (index 0 is reserved).
@@ -200,6 +201,7 @@ export class Verifier {
     // 6. Checkpoint resolution.
     const cacheKey = `${trust.origin}:${p.treeSize}`;
     let rootHash: Uint8Array;
+    let fetchedRevocHash: string | null = null;
     const cached = this.cache.get(cacheKey);
     if (cached) {
       const age = Math.floor((Date.now() - cached.fetchedAt) / 1000);
@@ -210,7 +212,7 @@ export class Verifier {
       let fetched: Uint8Array;
       let fetchedSize: bigint;
       try {
-        [fetched, fetchedSize] = await this.fetchAndVerifyCheckpoint(p.treeSize, trust);
+        [fetched, fetchedSize, fetchedRevocHash] = await this.fetchAndVerifyCheckpoint(p.treeSize, trust);
       } catch (e) {
         return fail("checkpoint fetch", String(e));
       }
@@ -225,7 +227,7 @@ export class Verifier {
     }
 
     // 7. Entry hash.
-    return this.runAfterRootHash(p, rootHash, trust, steps, add, fail, ok);
+    return this.runAfterRootHash(p, rootHash, trust, steps, add, fail, ok, fetchedRevocHash ?? null);
   }
 
   private async runAfterRootHash(
@@ -236,6 +238,7 @@ export class Verifier {
     add: (name: string, ok: boolean, detail: string) => void,
     fail: (step: string, reason: string) => VerifyTraceResult,
     ok: (result: VerifyOk) => VerifyTraceResult,
+    revocHashHex: string | null = null,
   ): Promise<VerifyTraceResult> {
     // 7. Entry hash.
     const eHash = entryHash(p.tbs);
@@ -295,7 +298,7 @@ export class Verifier {
     add("cbor decode", true, `schema_id=${entry.schemaId} issued=${entry.times[0]} expires=${entry.times[1]}`);
 
     // 10. Revocation check — SPEC.md §Revocation.
-    const revocResult = await this.checkRevocation(p.entryIndex, p.treeSize, trust);
+    const revocResult = await this.checkRevocation(p.entryIndex, p.treeSize, trust, revocHashHex);
     if (revocResult.revoked) return fail("revocation", revocResult.reason);
     add("revocation", true, revocResult.reason);
 
@@ -325,7 +328,7 @@ export class Verifier {
   private async fetchAndVerifyCheckpoint(
     requiredSize: bigint,
     trust: TrustConfig,
-  ): Promise<[Uint8Array, bigint]> {
+  ): Promise<[Uint8Array, bigint, string | null]> {
     let note: string;
     if (this.noteProvider) {
       note = await this.noteProvider(trust.checkpointUrl);
@@ -340,7 +343,7 @@ export class Verifier {
     note: string,
     requiredSize: bigint,
     trust: TrustConfig,
-  ): Promise<[Uint8Array, bigint]> {
+  ): Promise<[Uint8Array, bigint, string | null]> {
     const blankIdx = note.indexOf("\n\n");
     if (blankIdx < 0) throw new Error("note missing blank-line separator");
 
@@ -401,7 +404,7 @@ export class Verifier {
       throw new Error(`witness quorum not met: ${verified.size}/${trust.witnessQuorum}`);
     }
 
-    return [rootHash, treeSize];
+    return [rootHash, treeSize, _revocHashHex];
   }
 
   /** Revocation check — SPEC.md §Revocation — Verifier Behavior. */
@@ -445,7 +448,8 @@ export class Verifier {
   }
 
   private async checkRevocation(
-    entryIndex: bigint, checkpointTreeSize: bigint, trust: TrustConfig
+    entryIndex: bigint, checkpointTreeSize: bigint, trust: TrustConfig,
+    committedRevocHash: string | null = null
   ): Promise<{ revoked: boolean; reason: string }> {
     const STALE = 32n; // 2 × BATCH_SIZE
     if (!trust.revocationUrl)
@@ -483,6 +487,18 @@ export class Verifier {
       cached = p;
     }
 
+    // Revoc hash enforcement: reject if the checkpoint committed a revoc hash,
+    // the served artifact has the same tree_size as the checkpoint (same point
+    // in time, not a newer artifact), and the hashes differ (tampered artifact).
+    // Skip if artifact.treeSize > checkpoint.treeSize — artifact was updated
+    // legitimately (e.g., a revoke happened after the checkpoint was signed).
+    if (committedRevocHash &&
+        cached.treeSize < checkpointTreeSize &&
+        cached.artifactHash !== committedRevocHash)
+      return { revoked: true, reason:
+        `revocation artifact hash mismatch: checkpoint committed ${committedRevocHash.slice(0,16)}… `+
+        `but served artifact hashes to ${cached.artifactHash.slice(0,16)}…` };
+
     if (cached.treeSize <= entryIndex)
       return { revoked: true, reason: `entry ${entryIndex} not covered by artifact (tree_size=${cached.treeSize}) — fail-closed` };
     if (cached.cascade.query(entryIndex))
@@ -519,7 +535,8 @@ export class Verifier {
     const pub = trust.issuerPubKey;
     if (!verifySig(trust.sigAlg, new TextEncoder().encode(body), sigRaw.subarray(4), pub))
       return { error: "signature verification failed" };
-    return { cascade, treeSize };
+    const artifactHash = createHash("sha256").update(new TextEncoder().encode(text)).digest("hex");
+    return { cascade, treeSize, artifactHash };
   }
 }
 

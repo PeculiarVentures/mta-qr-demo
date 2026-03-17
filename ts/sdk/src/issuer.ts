@@ -88,6 +88,11 @@ interface SignedCheckpoint {
   cosigs:    WitnessCosig[];
 }
 
+// Process-wide registry — each origin string must be unique per process.
+const _registeredOrigins = new Set<string>();
+/** @internal For testing only — deregisters an origin from the global registry. */
+export function _deregisterOrigin(origin: string): void { _registeredOrigins.delete(origin); }
+
 export class Issuer {
   private readonly origin:      string;
   private readonly originId:    bigint;
@@ -108,6 +113,10 @@ export class Issuer {
   private initialized:   boolean    = false;
 
   constructor(config: IssuerConfig, signer: Signer) {
+    if (!config.origin) throw new Error("Issuer: origin must not be empty");
+    if (_registeredOrigins.has(config.origin))
+      throw new Error(`Issuer: origin "${config.origin}" is already registered — each origin must be unique`);
+    _registeredOrigins.add(config.origin);
     this.origin    = config.origin;
     this.originId  = computeOriginId(config.origin);
     this.schemaId  = config.schemaId;
@@ -274,11 +283,12 @@ export class Issuer {
   private async publishCheckpoint(): Promise<void> {
     const parentRoot = computeRoot(this.batchRoots());
     const treeSize   = this.totalEntries();
-    // Commit revocation state into the checkpoint body so witnesses attest to it.
-    const revocArt = this.latestRevArtifact;
-    const body = revocArt
+    // Build the new artifact FIRST so its hash can be committed in the
+    // checkpoint body. The checkpoint and artifact are then consistent.
+    const newRevocArt = await this.buildRevocationArtifact(treeSize);
+    const body = newRevocArt
       ? checkpointBodyWithRevoc(this.origin, BigInt(treeSize), parentRoot,
-          new TextEncoder().encode(revocArt))
+          new TextEncoder().encode(newRevocArt))
       : checkpointBody(this.origin, BigInt(treeSize), parentRoot);
     const issuerSig  = await this.signer.sign(body);
     const ts         = BigInt(Math.floor(Date.now() / 1000));
@@ -289,7 +299,7 @@ export class Issuer {
       return { keyId: w.keyId, timestamp: ts, signature: s64 };
     });
     this.latestCkpt = { treeSize, rootHash: parentRoot, body, issuerSig, cosigs };
-    this.latestRevArtifact = await this.buildRevocationArtifact(treeSize);
+    this.latestRevArtifact = newRevocArt;
   }
 
   private async buildRevocationArtifact(treeSize: number): Promise<string> {
