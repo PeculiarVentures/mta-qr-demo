@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"os"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/mta-qr/demo/shared/checkpoint"
 	"github.com/mta-qr/demo/shared/merkle"
 	"github.com/mta-qr/demo/shared/payload"
+	"github.com/mta-qr/demo/shared/signing"
 )
 
 // vectorFile is the path to the canonical test vectors JSON, relative to
@@ -491,5 +493,186 @@ func TestCascadeVectorR2(t *testing.T) {
 		if got := c.Query(q.Index); got != q.Revoked {
 			t.Errorf("R2 Query(%d) = %v, want %v", q.Index, got, q.Revoked)
 		}
+	}
+}
+
+func mustUnmarshal(t *testing.T, raw json.RawMessage, dst interface{}) {
+	t.Helper()
+	if err := json.Unmarshal(raw, dst); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+}
+
+// --- Vector: checkpoint-body-with-revoc ---
+
+func TestCheckpointBodyWithRevoc(t *testing.T) {
+	vs := loadVectors(t)
+	v, ok := vs["checkpoint-body-with-revoc"]
+	if !ok { t.Skip("vector not found") }
+
+	var inp struct {
+		Origin          string `json:"origin"`
+		TreeSize        uint64 `json:"tree_size"`
+		RootHashHex     string `json:"root_hash_hex"`
+		RevocArtifactHex string `json:"revoc_artifact_hex"`
+	}
+	var exp struct {
+		RevocHashHex string `json:"revoc_hash_hex"`
+		BodyHex      string `json:"body_hex"`
+		FourthLine   string `json:"fourth_line"`
+		ByteLength   int    `json:"byte_length"`
+	}
+	mustUnmarshal(t, v.Input, &inp)
+	mustUnmarshal(t, v.Expected, &exp)
+
+	rootHash, _ := hex.DecodeString(inp.RootHashHex)
+	artifact, _ := hex.DecodeString(inp.RevocArtifactHex)
+	body := checkpoint.BodyWithRevoc(inp.Origin, inp.TreeSize, rootHash, artifact)
+
+	if got := hex.EncodeToString(body); got != exp.BodyHex {
+		t.Errorf("body hex:\n  got  %s\n  want %s", got, exp.BodyHex)
+	}
+	if len(body) != exp.ByteLength {
+		t.Errorf("byte_length: got %d want %d", len(body), exp.ByteLength)
+	}
+	// Verify the 4th line is present
+	lines := strings.Split(strings.TrimSuffix(string(body), "\n"), "\n")
+	if len(lines) < 4 {
+		t.Fatalf("expected 4 lines, got %d", len(lines))
+	}
+	if lines[3] != exp.FourthLine {
+		t.Errorf("fourth line: got %q want %q", lines[3], exp.FourthLine)
+	}
+}
+
+// --- Vector: mode2-payload-encode ---
+
+func TestMode2PayloadEncode(t *testing.T) {
+	vs := loadVectors(t)
+	v, ok := vs["mode2-payload-encode"]
+	if !ok { t.Skip("vector not found") }
+
+	var inp struct {
+		Mode        int    `json:"mode"`
+		SigAlg      uint8  `json:"sig_alg"`
+		Origin      string `json:"origin"`
+		OriginIDHex string `json:"origin_id_hex"`
+		TreeSize    uint64 `json:"tree_size"`
+		EntryIndex  uint64 `json:"entry_index"`
+		TBSHex      string `json:"tbs_hex"`
+	}
+	var exp struct {
+		PayloadHex string `json:"payload_hex"`
+		ProofCount int    `json:"proof_count"`
+	}
+	mustUnmarshal(t, v.Input, &inp)
+	mustUnmarshal(t, v.Expected, &exp)
+
+	originIDBytes, _ := hex.DecodeString(inp.OriginIDHex)
+	var originID uint64
+	for _, b := range originIDBytes { originID = (originID << 8) | uint64(b) }
+	tbs, _ := hex.DecodeString(inp.TBSHex)
+
+	p := &payload.Payload{
+		Version: 0x01, Mode: payload.ModeOnline, SigAlg: inp.SigAlg,
+		SelfDescrib: true,
+		OriginID: originID, TreeSize: inp.TreeSize, EntryIndex: inp.EntryIndex, Origin: inp.Origin,
+		TBS: tbs,
+	}
+	encoded, err := payload.Encode(p)
+	if err != nil { t.Fatalf("encode: %v", err) }
+	if got := hex.EncodeToString(encoded); got != exp.PayloadHex {
+		t.Errorf("payload hex:\n  got  %s\n  want %s", got, exp.PayloadHex)
+	}
+	// Decode and verify proof_count == 0
+	dec, err := payload.Decode(encoded)
+	if err != nil { t.Fatalf("decode: %v", err) }
+	if len(dec.ProofHashes) != exp.ProofCount {
+		t.Errorf("proof_count: got %d want %d", len(dec.ProofHashes), exp.ProofCount)
+	}
+	if dec.Mode != payload.ModeOnline {
+		t.Errorf("mode: got %d want 2", dec.Mode)
+	}
+}
+
+// --- Vector: revoc-checkpoint-commitment ---
+
+func TestRevocCheckpointCommitment(t *testing.T) {
+	vs := loadVectors(t)
+	v, ok := vs["revoc-checkpoint-commitment"]
+	if !ok { t.Skip("vector not found") }
+
+	var inp struct {
+		Origin          string `json:"origin"`
+		TreeSize        uint64 `json:"tree_size"`
+		RootHashHex     string `json:"root_hash_hex"`
+		RevocArtifactHex string `json:"revoc_artifact_hex"`
+		PrivateSeedHex  string `json:"private_seed_hex"`
+	}
+	var exp struct {
+		PubKeyHex        string `json:"pub_key_hex"`
+		PlainBodyHex     string `json:"plain_body_hex"`
+		PlainSigHex      string `json:"plain_sig_hex"`
+		BodyWithRevocHex string `json:"body_with_revoc_hex"`
+		RevocSigHex      string `json:"revoc_sig_hex"`
+		SigsDiffer       bool   `json:"sigs_differ"`
+	}
+	mustUnmarshal(t, v.Input, &inp)
+	mustUnmarshal(t, v.Expected, &exp)
+
+	seed, _ := hex.DecodeString(inp.PrivateSeedHex)
+	rootHash, _ := hex.DecodeString(inp.RootHashHex)
+	artifact, _ := hex.DecodeString(inp.RevocArtifactHex)
+
+	signer, err := signing.Ed25519FromSeed(seed)
+	if err != nil { t.Fatalf("signer: %v", err) }
+
+	plainBody := checkpoint.Body(inp.Origin, inp.TreeSize, rootHash)
+	if got := hex.EncodeToString(plainBody); got != exp.PlainBodyHex {
+		t.Errorf("plain_body hex: got %s want %s", got, exp.PlainBodyHex)
+	}
+	plainSig, _ := signer.Sign(plainBody)
+	if got := hex.EncodeToString(plainSig); got != exp.PlainSigHex {
+		t.Errorf("plain_sig hex: got %s want %s", got, exp.PlainSigHex)
+	}
+	bodyWithRevoc := checkpoint.BodyWithRevoc(inp.Origin, inp.TreeSize, rootHash, artifact)
+	if got := hex.EncodeToString(bodyWithRevoc); got != exp.BodyWithRevocHex {
+		t.Errorf("body_with_revoc hex: got %s want %s", got, exp.BodyWithRevocHex)
+	}
+	revocSig, _ := signer.Sign(bodyWithRevoc)
+	if got := hex.EncodeToString(revocSig); got != exp.RevocSigHex {
+		t.Errorf("revoc_sig hex: got %s want %s", got, exp.RevocSigHex)
+	}
+	if (hex.EncodeToString(plainSig) != hex.EncodeToString(revocSig)) != exp.SigsDiffer {
+		t.Errorf("sigs_differ: got %v want %v", !exp.SigsDiffer, exp.SigsDiffer)
+	}
+}
+
+// --- Vector: reject-revoc-hash-mismatch ---
+
+func TestRejectRevocHashMismatch(t *testing.T) {
+	vs := loadVectors(t)
+	v, ok := vs["reject-revoc-hash-mismatch"]
+	if !ok { t.Skip("vector not found") }
+
+	var inp struct {
+		CommittedArtifactHex string `json:"committed_revoc_artifact_hex"`
+		ServedArtifactHex    string `json:"served_revoc_artifact_hex"`
+		CommittedHashHex     string `json:"committed_hash_hex"`
+		ServedHashHex        string `json:"served_hash_hex"`
+	}
+	var exp struct {
+		HashesMatch bool `json:"hashes_match"`
+	}
+	mustUnmarshal(t, v.Input, &inp)
+	mustUnmarshal(t, v.Expected, &exp)
+
+	served, _ := hex.DecodeString(inp.ServedArtifactHex)
+	h := sha256.Sum256(served)
+	servedHash := hex.EncodeToString(h[:])
+	match := servedHash == inp.CommittedHashHex
+	if match != exp.HashesMatch {
+		t.Errorf("hashes_match: got %v want %v (served=%s committed=%s)",
+			match, exp.HashesMatch, servedHash, inp.CommittedHashHex)
 	}
 }

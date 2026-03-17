@@ -325,6 +325,88 @@ mod vector_tests {
         assert!(!c.query(1));
         assert!(!c.query(99));
     }
+    // --- checkpoint-body-with-revoc ---
+    #[test]
+    fn test_checkpoint_body_with_revoc() {
+        use crate::issuer::checkpoint_body_with_revoc;
+        let vs = load_vectors();
+        let v = &vs["checkpoint-body-with-revoc"];
+        let origin    = v["input"]["origin"].as_str().unwrap();
+        let tree_size = v["input"]["tree_size"].as_u64().unwrap();
+        let root_hash = from_hex(v["input"]["root_hash_hex"].as_str().unwrap());
+        let artifact  = from_hex(v["input"]["revoc_artifact_hex"].as_str().unwrap());
+        let body = checkpoint_body_with_revoc(origin, tree_size, &root_hash, &artifact);
+        assert_eq!(hex(&body), v["expected"]["body_hex"].as_str().unwrap(), "body_hex");
+        assert_eq!(body.len(), v["expected"]["byte_length"].as_u64().unwrap() as usize, "byte_length");
+        let body_str = std::str::from_utf8(&body).unwrap();
+        let lines: Vec<&str> = body_str.trim_end_matches('\n').split('\n').collect();
+        assert!(lines.len() >= 4, "expected 4+ lines, got {}", lines.len());
+        assert_eq!(lines[3], v["expected"]["fourth_line"].as_str().unwrap(), "fourth_line");
+    }
+
+    // --- mode2-payload-encode ---
+    #[test]
+    fn test_mode2_payload_encode() {
+        use crate::verifier::decode_payload_pub as decode_payload;
+        let vs = load_vectors();
+        let v = &vs["mode2-payload-encode"];
+        let payload_hex = v["expected"]["payload_hex"].as_str().unwrap();
+        let bytes = from_hex(payload_hex);
+        let decoded = decode_payload(&bytes).expect("decode mode2 payload");
+        assert_eq!(decoded.mode, 2, "mode");
+        assert_eq!(decoded.proof_hashes.len(), v["expected"]["proof_count"].as_u64().unwrap() as usize, "proof_count");
+        assert_eq!(decoded.tree_size, v["input"]["tree_size"].as_u64().unwrap(), "tree_size");
+        assert_eq!(decoded.entry_index, v["input"]["entry_index"].as_u64().unwrap(), "entry_index");
+    }
+
+    // --- revoc-checkpoint-commitment ---
+    #[test]
+    fn test_revoc_checkpoint_commitment() {
+        use crate::issuer::{checkpoint_body_with_revoc};
+        use crate::signing::verify::verify;
+        let vs = load_vectors();
+        let v = &vs["revoc-checkpoint-commitment"];
+        let origin    = v["input"]["origin"].as_str().unwrap();
+        let tree_size = v["input"]["tree_size"].as_u64().unwrap();
+        let root_hash = from_hex(v["input"]["root_hash_hex"].as_str().unwrap());
+        let artifact  = from_hex(v["input"]["revoc_artifact_hex"].as_str().unwrap());
+        let seed      = from_hex(v["input"]["private_seed_hex"].as_str().unwrap());
+        let mut arr = [0u8; 32]; arr.copy_from_slice(&seed); let signer = LocalSigner::ed25519(&arr).unwrap();
+
+        let plain = checkpoint_body(origin, tree_size, &root_hash);
+        assert_eq!(hex(&plain), v["expected"]["plain_body_hex"].as_str().unwrap(), "plain_body_hex");
+
+        let with_revoc = checkpoint_body_with_revoc(origin, tree_size, &root_hash, &artifact);
+        assert_eq!(hex(&with_revoc), v["expected"]["body_with_revoc_hex"].as_str().unwrap(), "body_with_revoc_hex");
+
+        let plain_sig = tokio_test::block_on(signer.sign(&plain)).unwrap();
+        assert_eq!(hex(&plain_sig), v["expected"]["plain_sig_hex"].as_str().unwrap(), "plain_sig_hex");
+
+        let revoc_sig = tokio_test::block_on(signer.sign(&with_revoc)).unwrap();
+        assert_eq!(hex(&revoc_sig), v["expected"]["revoc_sig_hex"].as_str().unwrap(), "revoc_sig_hex");
+
+        let sigs_differ = plain_sig != revoc_sig;
+        assert_eq!(sigs_differ, v["expected"]["sigs_differ"].as_bool().unwrap(), "sigs_differ");
+
+        // Verify both sigs
+        let pub_key = from_hex(v["expected"]["pub_key_hex"].as_str().unwrap());
+        assert!(verify(6, &plain, &plain_sig, &pub_key), "plain sig must verify");
+        assert!(verify(6, &with_revoc, &revoc_sig, &pub_key), "revoc sig must verify");
+    }
+
+    // --- reject-revoc-hash-mismatch ---
+    #[test]
+    fn test_reject_revoc_hash_mismatch() {
+        use sha2::{Digest, Sha256};
+        let vs = load_vectors();
+        let v = &vs["reject-revoc-hash-mismatch"];
+        let served   = from_hex(v["input"]["served_revoc_artifact_hex"].as_str().unwrap());
+        let committed = v["input"]["committed_hash_hex"].as_str().unwrap();
+        let served_hash = hex(&Sha256::digest(&served).to_vec());
+        let hashes_match = served_hash == committed;
+        assert_eq!(hashes_match, v["expected"]["hashes_match"].as_bool().unwrap(), "hashes_match");
+    }
+
 }
 
 #[cfg(test)]
