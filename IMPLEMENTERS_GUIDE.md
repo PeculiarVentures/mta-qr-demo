@@ -496,7 +496,7 @@ collision. The full origin string is cheap to store. Use it.
 
 ## 10. Verification Flow — What to Stub and What to Implement
 
-A minimal correct verifier implements Mode 1 verification. Mode 0 and Mode 2
+A minimal correct verifier implements Mode 1 verification. Mode 0 and Mode 2 are
 are extensions. This section describes what's safe to stub and how to do it
 honestly.
 

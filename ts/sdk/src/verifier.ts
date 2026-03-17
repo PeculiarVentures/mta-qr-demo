@@ -21,7 +21,7 @@ import { decodePayload, MODE_ONLINE } from "./payload.js";
 import { decodeTbs, ENTRY_TYPE_DATA } from "./cbor.js";
 import { entryHash, verifyInclusion, computeRootFromProof } from "./merkle.js";
 import {
-  parseCheckpointBody, verifyCosignature, cosignatureMessage,
+  checkpointBody, parseCheckpointBody, verifyCosignature, cosignatureMessage,
 } from "./checkpoint.js";
 import { verifySig } from "./verify-sig.js";
 import { SIG_ALG_ED25519 } from "./signer.js";
@@ -147,10 +147,25 @@ export class Verifier {
     add("decode payload", true,
       `mode=${p.mode} sig_alg=${p.sigAlg} entry_index=${p.entryIndex} tree_size=${p.treeSize}`);
 
-    // 2. Mode check — reject Mode 0 before any network work.
+    // 2. Mode 0 — verify the embedded checkpoint directly from payload fields.
     if (p.mode === 0) {
-      return fail("mode check",
-        "Mode 0 (embedded checkpoint) is not implemented by this verifier — use Mode 1");
+      // Null entry check applies to Mode 0 too.
+      if (p.entryIndex === BigInt(0)) return fail("entry index", "entry_index=0 is reserved for null_entry");
+      add("entry index", true, `entry_index=${p.entryIndex} valid`);
+      // Resolve trust anchor.
+      const trust0 = this.anchors.get(p.originId);
+      if (!trust0) return fail("trust anchor",
+        `no anchor for origin_id 0x${p.originId.toString(16).padStart(16,"0")} — call addAnchor() first`);
+      add("trust anchor", true, `found: "${trust0.origin}"`);
+      // Algorithm binding.
+      if (p.sigAlg !== trust0.sigAlg) return fail("algorithm binding",
+        `payload sig_alg=${p.sigAlg} but trust config requires ${trust0.sigAlg}`);
+      add("algorithm binding", true, `sig_alg=${p.sigAlg} matches trust config`);
+      const emb = await this.verifyEmbeddedCheckpoint(p, trust0);
+      if (!emb.ok) return fail("embedded checkpoint", emb.reason);
+      add("embedded checkpoint", true,
+        `issuer sig ✓ · ${trust0.witnessQuorum}/${trust0.witnessQuorum} witnesses ✓`);
+      return this.runAfterRootHash(p, emb.rootHash, trust0, steps, add, fail, ok);
     }
 
     // 3. Reject null entry (index 0 is reserved).
@@ -209,6 +224,19 @@ export class Verifier {
       this.cache.set(cacheKey, { rootHash: fetched, fetchedAt: Date.now() });
     }
 
+    // 7. Entry hash.
+    return this.runAfterRootHash(p, rootHash, trust, steps, add, fail, ok);
+  }
+
+  private async runAfterRootHash(
+    p: ReturnType<typeof decodePayload>,
+    rootHash: Uint8Array,
+    trust: TrustConfig,
+    steps: VerifyStep[],
+    add: (name: string, ok: boolean, detail: string) => void,
+    fail: (step: string, reason: string) => VerifyTraceResult,
+    ok: (result: VerifyOk) => VerifyTraceResult,
+  ): Promise<VerifyTraceResult> {
     // 7. Entry hash.
     const eHash = entryHash(p.tbs);
     add("entry hash", true, `SHA-256(0x00 || tbs) = ${Buffer.from(eHash).toString("hex").slice(0, 16)}…`);
@@ -374,6 +402,45 @@ export class Verifier {
   }
 
   /** Revocation check — SPEC.md §Revocation — Verifier Behavior. */
+  /** Verify a Mode 0 embedded checkpoint against the trust config.
+   *  Returns the authenticated root hash on success. */
+  private verifyEmbeddedCheckpoint(
+    p: DecodedPayload,
+    trust: TrustConfig,
+  ): { ok: true; rootHash: Uint8Array } | { ok: false; reason: string } {
+    if (!p.rootHash || p.rootHash.length !== 32)
+      return { ok: false, reason: "root_hash missing or not 32 bytes" };
+    if (!p.issuerSig || p.issuerSig.length === 0)
+      return { ok: false, reason: "issuer_sig missing" };
+
+    // Reconstruct checkpoint body: origin\n + decimal(tree_size)\n + base64(root_hash)\n
+    const body = checkpointBody(trust.origin, p.treeSize, p.rootHash);
+
+    // Verify issuer signature over the body.
+    if (!verifySig(trust.sigAlg, body, p.issuerSig, trust.issuerPubKey))
+      return { ok: false, reason: `${trust.issuerKeyName} issuer signature invalid` };
+
+    // Verify witness cosignatures (always Ed25519 per spec).
+    // Reject duplicate key_ids — each witness contributes at most once to quorum.
+    const seenKeyIds = new Set<string>();
+    let verified = 0;
+    for (const cosig of (p.cosigs ?? [])) {
+      const kidHex = Buffer.from(cosig.keyId).toString("hex");
+      if (seenKeyIds.has(kidHex))
+        return { ok: false, reason: `duplicate witness key_id ${kidHex}` };
+      seenKeyIds.add(kidHex);
+      const msg = cosignatureMessage(body, cosig.timestamp);
+      for (const w of trust.witnesses) {
+        if (!cosig.keyId.every((b, i) => b === w.keyId[i])) continue;
+        if (verifySig(SIG_ALG_ED25519, msg, cosig.signature, w.pubKey)) { verified++; break; }
+      }
+    }
+    if (verified < trust.witnessQuorum)
+      return { ok: false, reason: `witness quorum not met: ${verified}/${trust.witnessQuorum}` };
+
+    return { ok: true, rootHash: p.rootHash };
+  }
+
   private async checkRevocation(
     entryIndex: bigint, checkpointTreeSize: bigint, trust: TrustConfig
   ): Promise<{ revoked: boolean; reason: string }> {

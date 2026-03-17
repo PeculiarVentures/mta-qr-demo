@@ -30,7 +30,7 @@ func TestNullEntryAtIndexZero(t *testing.T) {
 	l := newTestLog(t)
 
 	now := uint64(time.Now().Unix())
-	idx, _, err := l.AppendDataAssertion(now, now+3600, 1, map[string]any{"k": "v"})
+	idx, _, err := l.AppendDataAssertion(now, now+3600, 1, map[string]any{"k": "v"}, 1)
 	if err != nil {
 		t.Fatalf("AppendDataAssertion: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestSequentialIndices(t *testing.T) {
 	now := uint64(time.Now().Unix())
 
 	for want := uint64(1); want <= 5; want++ {
-		got, _, err := l.AppendDataAssertion(now, now+3600, 1, map[string]any{"i": want})
+		got, _, err := l.AppendDataAssertion(now, now+3600, 1, map[string]any{"i": want}, 1)
 		if err != nil {
 			t.Fatalf("AppendDataAssertion %d: %v", want, err)
 		}
@@ -63,7 +63,7 @@ func TestProofRoundTrip(t *testing.T) {
 	l := newTestLog(t)
 	now := uint64(time.Now().Unix())
 
-	idx, payloadBytes, err := l.AppendDataAssertion(now, now+3600, 1, map[string]any{"k": "v"})
+	idx, payloadBytes, err := l.AppendDataAssertion(now, now+3600, 1, map[string]any{"k": "v"}, 1)
 	if err != nil {
 		t.Fatalf("AppendDataAssertion: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestCheckpointPublished(t *testing.T) {
 	l := newTestLog(t)
 	now := uint64(time.Now().Unix())
 
-	if _, _, err := l.AppendDataAssertion(now, now+3600, 1, map[string]any{"k": "v"}); err != nil {
+	if _, _, err := l.AppendDataAssertion(now, now+3600, 1, map[string]any{"k": "v"}, 1); err != nil {
 		t.Fatalf("AppendDataAssertion: %v", err)
 	}
 
@@ -172,7 +172,7 @@ func TestMultipleBatchesCrossProof(t *testing.T) {
 	// Append BatchSize + 1 entries to force a batch boundary.
 	var lastPayload []byte
 	for i := 0; i <= log.BatchSize; i++ {
-		_, pb, err := l.AppendDataAssertion(now, now+3600, 1, map[string]any{"i": i})
+		_, pb, err := l.AppendDataAssertion(now, now+3600, 1, map[string]any{"i": i}, 1)
 		if err != nil {
 			t.Fatalf("AppendDataAssertion %d: %v", i, err)
 		}
@@ -203,9 +203,9 @@ func TestRevokeAndArtifact(t *testing.T) {
 
 	ttl := 1 * time.Hour
 	now := uint64(time.Now().Unix())
-	idx1, _, err := l.AppendDataAssertion(now, now+uint64(ttl.Seconds()), 1, map[string]any{"subject": "alice"})
+	idx1, _, err := l.AppendDataAssertion(now, now+uint64(ttl.Seconds()), 1, map[string]any{"subject": "alice"}, 1)
 	if err != nil { t.Fatalf("Issue 1: %v", err) }
-	idx2, _, err := l.AppendDataAssertion(now, now+uint64(ttl.Seconds()), 1, map[string]any{"subject": "bob"})
+	idx2, _, err := l.AppendDataAssertion(now, now+uint64(ttl.Seconds()), 1, map[string]any{"subject": "bob"}, 1)
 	if err != nil { t.Fatalf("Issue 2: %v", err) }
 
 	// Before revocation: artifact exists, neither entry is revoked.
@@ -264,7 +264,7 @@ func TestMultipleRevocations(t *testing.T) {
 	indices := make([]uint64, 4)
 	for i := range indices {
 		now2 := uint64(time.Now().Unix())
-		idx, _, err := l.AppendDataAssertion(now2, now2+3600, 1, map[string]any{"i": i})
+		idx, _, err := l.AppendDataAssertion(now2, now2+3600, 1, map[string]any{"i": i}, 1)
 		if err != nil { t.Fatalf("Issue %d: %v", i, err) }
 		indices[i] = idx
 	}

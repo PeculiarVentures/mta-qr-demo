@@ -2,7 +2,7 @@
 """
 MTA-QR Interop Test Script
 Builds and starts all six services (two issuers per algorithm × two implementations + two verifiers),
-runs the 12-cell positive matrix (3 algorithms × 4 issuer/verifier combinations), 3 negative tests, and 2 revocation cross-impl tests, and reports results.
+runs the 12-cell positive matrix (3 algorithms × 4 issuer/verifier combinations), 3 negative tests, 2 revocation cross-impl tests, and 2 Mode 0 cross-impl tests, and reports results.
 
 Requires: Go 1.22+, Node 20+, tsx installed globally.
 """
@@ -46,6 +46,16 @@ SERVICES = [
     # Dedicated verifiers for revocation tests — start with empty caches, loaded per-test.
     {"name": "rev-go-verifier", "bin": "/tmp/mta-go-verifier", "port": 8092, "env": {}},
     {"name": "rev-ts-verifier", "bin": "npx", "args": ["tsx", "verifier/main.ts"], "port": 3012,
+     "cwd": TS_DIR, "env": {}},
+    # Dedicated issuers for Mode 0 interop tests.
+    {"name": "mode0-go-issuer", "bin": "/tmp/mta-go-issuer", "port": 8093, "env": {
+        "MTA_SIG_ALG": "", "MTA_ORIGIN": "demo.mta-qr.example/go-issuer/mode0-test/v1"}},
+    {"name": "mode0-ts-issuer", "bin": "npx", "args": ["tsx", "issuer/main.ts"], "port": 3013,
+     "cwd": TS_DIR, "env": {
+        "MTA_SIG_ALG": "", "MTA_ORIGIN": "demo.mta-qr.example/ts-issuer/mode0-test/v1"}},
+    # Dedicated verifiers for Mode 0 tests — no checkpoint fetch should occur.
+    {"name": "mode0-go-verifier", "bin": "/tmp/mta-go-verifier", "port": 8094, "env": {}},
+    {"name": "mode0-ts-verifier", "bin": "npx", "args": ["tsx", "verifier/main.ts"], "port": 3014,
      "cwd": TS_DIR, "env": {}},
 ]
 
@@ -416,6 +426,85 @@ run_revocation_test("Revoke: Go issuer → TS verifier rejects",
     issuer_port=8091, verifier_port=3012)
 run_revocation_test("Revoke: TS issuer → Go verifier rejects",
     issuer_port=3011, verifier_port=8092)
+
+def run_mode0_test(label, issuer_port, verifier_port):
+    """
+    Issue a Mode 0 QR (embedded checkpoint) and verify it cross-implementation.
+    No checkpoint URL fetch should occur — the verifier uses the embedded sigs.
+    """
+    print(f"\n  [{label}]")
+    row = {"label": label, "ok": False, "steps": [], "error": None}
+
+    if not check_alive(issuer_port) or not check_alive(verifier_port):
+        row["error"] = "service not responding"
+        print(f"    {FAIL} service not responding")
+        results.append(row)
+        return
+
+    # Load trust config into verifier.
+    tc_url = f"http://localhost:{issuer_port}/trust-config"
+    try:
+        tc_resp = post(f"http://localhost:{verifier_port}/load-trust-config", {"url": tc_url})
+        if not tc_resp.get("ok"):
+            row["error"] = f"load-trust-config failed: {tc_resp}"
+            print(f"    {FAIL} load-trust-config: {tc_resp}")
+            results.append(row)
+            return
+        print(f"    {PASS} loaded trust config: {tc_resp.get('origin')}")
+    except Exception as e:
+        row["error"] = f"load-trust-config error: {e}"
+        print(f"    {FAIL} {e}")
+        results.append(row)
+        return
+
+    # Issue a Mode 0 QR payload.
+    try:
+        issue_resp = post(f"http://localhost:{issuer_port}/issue", {
+            "schema_id": 42, "ttl_seconds": 3600,
+            "mode": 0,
+            "claims": {"test": label, "subject": "mode0-interop"}
+        })
+        payload_hex = issue_resp["payload_hex"]
+        entry_index = issue_resp["entry_index"]
+        payload_len = len(payload_hex) // 2
+        print(f"    {PASS} issued Mode 0 entry_index={entry_index} payload_len={payload_len}B")
+    except Exception as e:
+        row["error"] = f"issue error: {e}"
+        print(f"    {FAIL} {e}")
+        results.append(row)
+        return
+
+    # Verify — the payload carries its own signed checkpoint so no network fetch needed.
+    try:
+        verify_resp = post(f"http://localhost:{verifier_port}/verify", {"payload_hex": payload_hex})
+        valid = verify_resp.get("valid", False)
+        steps = verify_resp.get("steps", [])
+        for step in steps:
+            icon = PASS if step["ok"] else FAIL
+            print(f"    {icon} {step['name']}: {step['detail'][:80]}")
+        if valid:
+            result_mode = verify_resp.get("mode", -1)
+            if result_mode != 0:
+                row["error"] = f"expected mode=0 in result, got {result_mode}"
+                print(f"    {FAIL} mode mismatch: {result_mode}")
+            else:
+                print(f"    {PASS} VALID mode=0 — claims: {verify_resp.get('claims', {})}")
+                row["ok"] = True
+        else:
+            row["error"] = verify_resp.get("error", "invalid")
+            print(f"    {FAIL} INVALID — {row['error']}")
+        row["steps"] = steps
+    except Exception as e:
+        row["error"] = f"verify error: {e}"
+        print(f"    {FAIL} {e}")
+
+    results.append(row)
+
+# ---- Mode 0 cross-implementation tests ----
+run_mode0_test("Mode 0: Go issuer → TS verifier",
+    issuer_port=8093, verifier_port=3014)
+run_mode0_test("Mode 0: TS issuer → Go verifier",
+    issuer_port=3013, verifier_port=8094)
 
 # ---- Summary ----
 print("\n" + "=" * 60)

@@ -4,7 +4,7 @@
 
 Reference implementation of **MTA-QR** — Merkle Tree Assertions for Verifiable QR Codes.
 
-MTA-QR issues cryptographically authenticated QR codes backed by a transparency log. Each QR code is a log entry with a Merkle inclusion proof tying it to a signed, witnessed checkpoint. Verification is offline after a one-time prefetch (Mode 1), or fully embedded in the payload for deployments where no checkpoint fetch is possible (Mode 0), or deferred to a tile server for high-throughput fixed-infrastructure scanning (Mode 2). The protocol is algorithm-agnostic and PQC-ready.
+MTA-QR issues cryptographically authenticated QR codes backed by a transparency log. Each QR code is a log entry with a Merkle inclusion proof tying it to a signed, witnessed checkpoint. Verification is offline after a one-time prefetch (Mode 1), or fully embedded in the payload for deployments where no checkpoint fetch is possible (Mode 0), or deferred to a tile server for high-throughput fixed-infrastructure scanning (Mode 2). All three modes are implemented. The protocol is algorithm-agnostic and PQC-ready.
 
 This repository provides four independent implementations (Go, TypeScript, Rust, Java) that pass a shared interop matrix across three signing algorithms and two payload modes.
 
@@ -100,9 +100,9 @@ Each verifier asserts the `mode` field on the result matches the issued payload 
 
 ### Payload modes
 
-MTA-QR has three payload modes defined in the protocol. Modes 1 and 2 are implemented in all four SDKs. Mode 0 is not yet implemented (see Known Limitations).
+MTA-QR has three payload modes defined in the protocol, all implemented across all four SDKs.
 
-**Mode 0 — embedded (no checkpoint fetch).** The payload includes the inclusion proof and a compact cosigned checkpoint (root hash + issuer signature + witness cosignatures). No network access at scan time — the checkpoint is verified from the embedded signatures rather than fetched. A trust configuration (issuer and witness public keys) must still be pre-loaded; Mode 0 eliminates the checkpoint fetch, not the trust distribution step. Largest payload size. Not yet implemented.
+**Mode 0 — embedded (no checkpoint fetch).** The payload includes the inclusion proof and a compact cosigned checkpoint (root hash + issuer signature + witness cosignatures). No network access at scan time — the checkpoint is verified from the embedded signatures rather than fetched. A trust configuration (issuer and witness public keys) must still be pre-loaded; Mode 0 eliminates the checkpoint fetch, not the trust distribution step. Largest payload size (~440 bytes for Ed25519). Implemented in all four SDKs.
 
 **Mode 1 — cached checkpoint (offline after prefetch).** The payload includes the inclusion proof but not the checkpoint. The verifier resolves the checkpoint from its local cache; on cache miss it fetches once and caches the result. This is the default mode and the right choice for most deployments.
 
@@ -216,6 +216,8 @@ All four implementations enforce the following and they are covered by the test 
 
 **Test keys are opaque.** Test seeds are 32-byte values generated from `/dev/urandom`, not derived from strings. This prevents the `sha256("test-ed25519")` pattern from being copied into production.
 
+**Revocation uses a Bloom filter cascade for constant-time, offline-capable checks.** The issuer builds a multi-level Bloom filter cascade (CRLite-inspired, not wire-compatible) over the sets of revoked and valid entry indices. The signed artifact is ~7 bytes for a small log and grows logarithmically. Verifiers fetch it on cache miss, verify the issuer signature with algorithm binding, and query it in constant time with no false negatives. The check is fail-closed — a missing or invalid artifact causes verification to fail. Bandwidth cost per check: approximately one artifact fetch per STALE_THRESHOLD entries (default 32), not one per verification.
+
 **Mode 2 does not verify inclusion.** Documented in the `Verifier` class docstring and `IssuerConfig.mode` field doc in all four SDKs. The `mode` field on `VerifyOk` lets callers detect and gate on it.
 
 ---
@@ -232,7 +234,7 @@ These are genuine gaps that should be addressed before production use. They are 
 
 **Remaining revocation gap:** Mode 0 deployments require a pre-loaded cached artifact since no network fetch occurs at scan time. The current verifiers skip the revocation check (fail-open) when no `revocation_url` is present in the trust config, which is the correct behavior for Mode 0 pre-loaded deployments. Verifier operators that require hard revocation guarantees at Mode 0 scan time must pre-load and periodically refresh the artifact out of band.
 
-**Mode 0 (embedded checkpoint) not implemented.** The payload codec defines `mode=0` where the cosigned checkpoint (root hash + issuer signature + witness cosignatures) is embedded directly in the payload. This eliminates the checkpoint fetch at scan time but still requires a pre-loaded trust configuration — the embedded signatures are verified against the issuer and witness public keys in that config. The issuer and verifier in all four SDKs handle only modes 1 and 2.
+**Mode 0 (embedded checkpoint) implemented.** Issuers embed the root hash, issuer signature, and witness cosignatures directly in the payload. Verifiers reconstruct the checkpoint body from these fields and verify all signatures without any network access. Mode 0 payloads are ~440 bytes for Ed25519 with a 2-witness quorum. All four SDKs (Go, TypeScript, Rust, Java) issue and verify Mode 0 payloads; cross-implementation interop is verified in the interop matrix.
 
 **`key_assertion` (entry_type=0x02) not implemented.** The verifier rejects `entry_type != 0x01`. Key assertions with possession proofs (challenge-response) are defined in the spec but not implemented.
 

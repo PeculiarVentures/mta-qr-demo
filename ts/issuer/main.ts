@@ -14,7 +14,7 @@ import {
 } from "../sdk/src/checkpoint.js";
 import { ed25519FromSeed, ecdsaP256FromScalar, mlDsa44FromSeed, newEd25519, newECDSAP256, newMLDSA44, SIG_ALG_ED25519, SIG_ALG_ECDSA_P256, SIG_ALG_MLDSA44, sigAlgName } from "../sdk/src/signers/local.js";
 import type { LocalSigner } from "../sdk/src/signer.js";
-import { encodePayload, MODE_CACHED, WitnessCosig } from "../sdk/src/payload.js";
+import { encodePayload, MODE_EMBEDDED, MODE_CACHED, WitnessCosig } from "../sdk/src/payload.js";
 import { Cascade } from "../sdk/src/cascade.js";
 
 const ORIGIN = process.env.MTA_ORIGIN ?? "demo.mta-qr.example/ts-issuer/v1";
@@ -321,21 +321,57 @@ const server = createServer(async (req, res) => {
     });
   }
 
+function buildMode0Payload(entryIdx: number, tbs: Uint8Array): Uint8Array {
+  const ckpt = latestCkpt!;
+  // Build the two-phase tiled inclusion proof (same as Mode 1).
+  const batchIdx = Math.floor(entryIdx / BATCH_SIZE);
+  const innerIdx = entryIdx % BATCH_SIZE;
+  const batchData = batchIdx < batches.length ? batches[batchIdx] : currentBatch;
+  const batchHashes = (batchData as typeof currentBatch).map((e: {hash: Uint8Array}) => e.hash);
+  const batchSz = batchHashes.length;
+  const innerProof = inclusionProof(batchHashes, innerIdx, batchSz);
+  const allRoots = batchRoots();
+  const outerProof = inclusionProof(allRoots, batchIdx, allRoots.length);
+  const allProof = [...innerProof, ...outerProof];
+
+  // Use the issuer sig from the stored checkpoint — it was signed at publishCheckpoint time.
+  // latestCkpt.issuerSig is the raw sig bytes (no signed-note prefix).
+  const body = ckpt.body;  // canonical body already computed at checkpoint time
+  const issuerSig = ckpt.issuerSig;
+
+  // Witness cosignatures.
+  const cosigs: WitnessCosig[] = witnesses.map(w => {
+    const ts = BigInt(Math.floor(Date.now() / 1000));
+    const sig = signCosignature(body, ts, w.seed);
+    return { keyId: w.keyId, timestamp: ts, signature: sig };
+  });
+
+  return encodePayload({
+    version: 0x01, mode: MODE_EMBEDDED, sigAlg: issuerSigner.sigAlg,
+    dualSig: false, selfDescrib: true,
+    originId, treeSize: BigInt(ckpt.treeSize), entryIndex: BigInt(entryIdx), origin: ORIGIN,
+    proofHashes: allProof, innerProofCount: innerProof.length,
+    tbs,
+    rootHash: ckpt.rootHash, issuerSig, cosigs,
+  });
+}
+
   // POST /issue
   if (req.method === "POST" && url.pathname === "/issue") {
     let body: { schema_id?: number; ttl_seconds?: number; claims?: Record<string, unknown> };
     try { body = JSON.parse(await readBody(req)); } catch { return json(res, { error: "bad JSON" }, 400); }
 
-    const ttl      = body.ttl_seconds ?? 3600;
-    const schemaId = body.schema_id ?? 1;
-    const claims   = body.claims ?? {};
+    const ttl      = (body as any).ttl_seconds ?? 3600;
+    const schemaId = (body as any).schema_id ?? 1;
+    const claims   = (body as any).claims ?? {};
+    const mode     = (body as any).mode ?? 1;
     const now    = Math.floor(Date.now() / 1000);
     const expiry = now + ttl;
 
     const tbs    = encodeDataAssertion({ times: [now, expiry], schemaId, claims });
     const idx    = appendEntry(tbs);
     publishCheckpoint();
-    const payloadBytes = buildMode1Payload(idx, tbs);
+    const payloadBytes = mode === 0 ? buildMode0Payload(idx, tbs) : buildMode1Payload(idx, tbs);
     const payloadHex   = Buffer.from(payloadBytes).toString("hex");
     const payloadB64   = Buffer.from(payloadBytes).toString("base64");
     const payloadB64Url = Buffer.from(payloadBytes).toString("base64url");

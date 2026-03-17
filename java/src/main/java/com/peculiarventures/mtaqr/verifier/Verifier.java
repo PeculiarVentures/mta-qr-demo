@@ -269,10 +269,62 @@ public final class Verifier {
                 "payload sig_alg=" + p.sigAlg + " but trust config requires " + trust.sigAlg);
         steps.add(new Step("algorithm binding", true, "sig_alg=" + p.sigAlg + " matches trust config"));
 
-        return null; // all sync checks passed
+        // Mode 0: verify embedded checkpoint and run all checks synchronously.
+        if (p.mode == 0) {
+            try {
+                byte[] rootHash = verifyEmbeddedCheckpoint(p, trust);
+                steps.add(new Step("embedded checkpoint", true,
+                    "issuer sig ✓ · " + trust.witnessQuorum + "/" + trust.witnessQuorum + " witnesses ✓"));
+                return runProofAndClaimsChecks(p, rootHash, steps, trust);
+            } catch (Exception e) {
+                return fail(steps, "embedded checkpoint", e.getMessage());
+            }
+        }
+
+        return null; // all sync checks passed (Mode 1/2 continue to async phase)
     }
 
     // --- proof + claims checks (after checkpoint) ---
+
+    /**
+     * Verify the embedded checkpoint in a Mode 0 payload.
+     * Returns the authenticated root hash, or throws on verification failure.
+     */
+    private byte[] verifyEmbeddedCheckpoint(DecodedPayload p, TrustConfig trust) {
+        if (p.rootHash() == null || p.rootHash().length != 32)
+            throw new IllegalStateException("root_hash missing or not 32 bytes");
+        if (p.issuerSig() == null || p.issuerSig().length == 0)
+            throw new IllegalStateException("issuer_sig missing");
+
+        // Reconstruct checkpoint body: origin\n + decimal(tree_size)\n + base64(root_hash)\n
+        byte[] body = com.peculiarventures.mtaqr.issuer.Issuer.checkpointBody(
+            trust.origin, p.treeSize(), p.rootHash());
+
+        // Verify issuer signature.
+        if (!SignatureVerifier.verify(trust.sigAlg, body, p.issuerSig(), trust.issuerPubKey))
+            throw new IllegalStateException(trust.issuerKeyName + " issuer signature invalid");
+
+        // Verify witness cosignatures (always Ed25519). Reject duplicate key_ids.
+        Set<String> seenKeyIds = new HashSet<>();
+        int verified = 0;
+        for (WitnessCosig cosig : p.cosigs()) {
+            String kidHex = bytesToHex(cosig.keyId());
+            if (!seenKeyIds.add(kidHex))
+                throw new IllegalStateException("duplicate witness key_id " + kidHex);
+            byte[] msg = com.peculiarventures.mtaqr.issuer.Issuer.cosignatureMessage(body, cosig.timestamp());
+            for (TrustConfig.WitnessEntry w : trust.witnesses) {
+                if (!Arrays.equals(cosig.keyId(), w.keyId())) continue;
+                // Witnesses always use Ed25519 regardless of issuer sig_alg.
+                if (SignatureVerifier.verify(6 /* Ed25519 */, msg, cosig.signature(), w.pubKey())) {
+                    verified++; break;
+                }
+            }
+        }
+        if (verified < trust.witnessQuorum)
+            throw new IllegalStateException(
+                "witness quorum not met: " + verified + "/" + trust.witnessQuorum);
+        return p.rootHash();
+    }
 
     private TraceResult runProofAndClaimsChecks(DecodedPayload p, byte[] rootHash, List<Step> steps, TrustConfig trust) {
         // Entry hash
@@ -558,10 +610,14 @@ public final class Verifier {
     // --- payload decoding ---
 
     // Public for vector tests.
+    public record WitnessCosig(byte[] keyId, long timestamp, byte[] signature) {}
+
     public record DecodedPayload(
         int mode, int sigAlg, boolean selfDescrib,
         long originId, long treeSize, long entryIndex,
-        String origin, List<byte[]> proofHashes, int innerCount, byte[] tbs
+        String origin, List<byte[]> proofHashes, int innerCount, byte[] tbs,
+        // Mode 0 only:
+        byte[] rootHash, byte[] issuerSig, List<WitnessCosig> cosigs
     ) {}
 
     // Package-private test accessor.
@@ -600,11 +656,27 @@ public final class Verifier {
         int tbsLen = buf.getShort() & 0xffff;
         byte[] tbs = new byte[tbsLen];
         buf.get(tbs);
+        // Mode 0: parse embedded checkpoint fields.
+        byte[] rootHash = null;
+        byte[] issuerSig = null;
+        List<WitnessCosig> cosigs = new ArrayList<>();
+        if (mode == 0) {
+            rootHash = new byte[32]; buf.get(rootHash);
+            int sigLen = buf.getShort() & 0xffff;
+            issuerSig = new byte[sigLen]; buf.get(issuerSig);
+            int cosigCount = buf.get() & 0xff;
+            for (int i = 0; i < cosigCount; i++) {
+                byte[] kid = new byte[4]; buf.get(kid);
+                long ts = buf.getLong();
+                byte[] sig = new byte[64]; buf.get(sig);
+                cosigs.add(new WitnessCosig(kid, ts, sig));
+            }
+        }
         if (buf.hasRemaining())
             throw new IllegalArgumentException(
                 "payload: " + buf.remaining() + " trailing bytes after TBS");
         return new DecodedPayload(mode, sigAlg, selfDesc, originId, treeSize,
-            entryIndex, origin, proofHashes, innerCount, tbs);
+            entryIndex, origin, proofHashes, innerCount, tbs, rootHash, issuerSig, cosigs);
     }
 
     // --- helpers ---
@@ -638,4 +710,10 @@ public final class Verifier {
         }
         public VerifyFail getFail() { return fail; }
     }
+    private static String bytesToHex(byte[] b) {
+        StringBuilder sb = new StringBuilder(b.length * 2);
+        for (byte v : b) sb.append(String.format("%02x", v & 0xff));
+        return sb.toString();
+    }
+
 }

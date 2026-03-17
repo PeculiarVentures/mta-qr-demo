@@ -189,45 +189,50 @@ func (v *Verifier) Verify(payloadBytes []byte) *Result {
 	}
 	add("Algorithm binding", true, fmt.Sprintf("sig_alg=%d matches trust config", p.SigAlg))
 
-	// 6. Mode check — Mode 0 (embedded checkpoint) not yet implemented.
-	// A Mode 0 payload carries its own root_hash, issuer_sig, and witness cosigs
-	// in the binary payload itself; the verifier should verify those directly
-	// rather than fetching the checkpoint over the network. Silently falling
-	// through to the Mode 1 network fetch is the wrong behavior: it would
-	// succeed or fail based on network reachability rather than the embedded proof.
-	if p.Mode == 0 {
-		return fail("Mode check", "Mode 0 (embedded checkpoint) is not yet implemented by this verifier — use Mode 1")
-	}
-
-	// 7. Checkpoint resolution.
-	cacheKey := fmt.Sprintf("%s:%d", anchor.Origin, p.TreeSize)
-	v.mu.RLock()
-	cached := v.cache[cacheKey]
-	v.mu.RUnlock()
-
+	// 6. Checkpoint resolution — method depends on mode.
 	var rootHash []byte
-	if cached != nil {
-		add("Checkpoint cache", true, fmt.Sprintf("cache hit · tree_size=%d · fetched %s ago", p.TreeSize, time.Since(cached.FetchedAt).Round(time.Second)))
-		rootHash = cached.RootHash
+	if p.Mode == payload.ModeEmbedded {
+		// Mode 0: verify the checkpoint embedded directly in the payload.
+		// No network access — the issuer sig and witness cosigs are in the payload bytes.
+		embRoot, embErr := v.verifyEmbeddedCheckpoint(p, anchor)
+		if embErr != nil {
+			return fail("Embedded checkpoint", embErr.Error())
+		}
+		add("Embedded checkpoint", true, fmt.Sprintf(
+			"issuer sig ✓ · %d/%d witnesses ✓ · root_hash=%s",
+			anchor.WitnessQuorum, anchor.WitnessQuorum,
+			hex.EncodeToString(embRoot[:8])+"…"))
+		rootHash = embRoot
 	} else {
-		add("Checkpoint cache", false, fmt.Sprintf("cache miss · tree_size=%d · fetching from %s", p.TreeSize, anchor.CheckpointURL))
-		fetchedRoot, fetchedSize, ferr := v.fetchAndVerify(anchor, p.TreeSize)
-		if ferr != nil {
-			return fail("Checkpoint fetch+verify", ferr.Error())
-		}
-		add("Checkpoint fetch+verify", true, fmt.Sprintf("issuer sig ✓ · %d/%d witnesses ✓ · tree_size=%d",
-			anchor.WitnessQuorum, anchor.WitnessQuorum, fetchedSize))
-		rootHash = fetchedRoot
-		v.mu.Lock()
-		if _, exists := v.cache[cacheKey]; !exists {
-			if len(v.cacheOrder) >= maxCacheEntries {
-				delete(v.cache, v.cacheOrder[0])
-				v.cacheOrder = v.cacheOrder[1:]
+		// Mode 1/2: resolve checkpoint from cache or HTTP.
+		cacheKey := fmt.Sprintf("%s:%d", anchor.Origin, p.TreeSize)
+		v.mu.RLock()
+		cached := v.cache[cacheKey]
+		v.mu.RUnlock()
+
+		if cached != nil {
+			add("Checkpoint cache", true, fmt.Sprintf("cache hit · tree_size=%d · fetched %s ago", p.TreeSize, time.Since(cached.FetchedAt).Round(time.Second)))
+			rootHash = cached.RootHash
+		} else {
+			add("Checkpoint cache", false, fmt.Sprintf("cache miss · tree_size=%d · fetching from %s", p.TreeSize, anchor.CheckpointURL))
+			fetchedRoot, fetchedSize, ferr := v.fetchAndVerify(anchor, p.TreeSize)
+			if ferr != nil {
+				return fail("Checkpoint fetch+verify", ferr.Error())
 			}
-			v.cacheOrder = append(v.cacheOrder, cacheKey)
+			add("Checkpoint fetch+verify", true, fmt.Sprintf("issuer sig ✓ · %d/%d witnesses ✓ · tree_size=%d",
+				anchor.WitnessQuorum, anchor.WitnessQuorum, fetchedSize))
+			rootHash = fetchedRoot
+			v.mu.Lock()
+			if _, exists := v.cache[cacheKey]; !exists {
+				if len(v.cacheOrder) >= maxCacheEntries {
+					delete(v.cache, v.cacheOrder[0])
+					v.cacheOrder = v.cacheOrder[1:]
+				}
+				v.cacheOrder = append(v.cacheOrder, cacheKey)
+			}
+			v.cache[cacheKey] = &CachedCheckpoint{TreeSize: fetchedSize, RootHash: fetchedRoot, FetchedAt: time.Now()}
+			v.mu.Unlock()
 		}
-		v.cache[cacheKey] = &CachedCheckpoint{TreeSize: fetchedSize, RootHash: fetchedRoot, FetchedAt: time.Now()}
-		v.mu.Unlock()
 	}
 
 	// 8. Entry hash.
@@ -328,6 +333,55 @@ func (v *Verifier) Verify(payloadBytes []byte) *Result {
 }
 
 // fetchAndVerify fetches and verifies the checkpoint from the issuer endpoint.
+// verifyEmbeddedCheckpoint verifies a Mode 0 payload's embedded checkpoint.
+// It reconstructs the checkpoint body from the payload fields and verifies
+// the issuer signature and witness cosignatures embedded in the payload binary.
+// No network access is performed.
+func (v *Verifier) verifyEmbeddedCheckpoint(p *payload.Payload, anchor *TrustAnchor) ([]byte, error) {
+	if len(p.RootHash) != 32 {
+		return nil, fmt.Errorf("root_hash must be 32 bytes, got %d", len(p.RootHash))
+	}
+	if len(p.IssuerSig) == 0 {
+		return nil, fmt.Errorf("issuer_sig is empty")
+	}
+
+	// Reconstruct the checkpoint body per SPEC.md §Mode 0:
+	//   <origin>\n<decimal(tree_size)>\n<base64(root_hash)>\n
+	body := checkpoint.Body(anchor.Origin, p.TreeSize, p.RootHash)
+
+	// Verify issuer signature over the checkpoint body.
+	if !signing.Verify(anchor.SigAlg, body, p.IssuerSig, anchor.IssuerPubKey) {
+		return nil, fmt.Errorf("%s issuer signature invalid", signing.SigAlgName(anchor.SigAlg))
+	}
+
+	// Verify witness cosignatures. Witnesses always use Ed25519.
+	// Reject duplicate key_ids — each witness may contribute at most once to quorum.
+	verifiedWitnesses := map[string]bool{}
+	seenKeyIDs := map[[4]byte]bool{}
+	for _, cosig := range p.Cosigs {
+		if seenKeyIDs[cosig.KeyID] {
+			return nil, fmt.Errorf("duplicate witness key_id %x in payload", cosig.KeyID)
+		}
+		seenKeyIDs[cosig.KeyID] = true
+		msg := checkpoint.CosignatureV1Message(body, cosig.Timestamp)
+		for _, w := range anchor.Witnesses {
+			if !bytes.Equal(cosig.KeyID[:], w.KeyID[:]) {
+				continue
+			}
+			if signing.Verify(signing.SigAlgEd25519, msg, cosig.Signature[:], w.PubKey) {
+				verifiedWitnesses[w.Name] = true
+			}
+		}
+	}
+	if len(verifiedWitnesses) < anchor.WitnessQuorum {
+		return nil, fmt.Errorf("witness quorum not met: %d/%d verified",
+			len(verifiedWitnesses), anchor.WitnessQuorum)
+	}
+
+	return p.RootHash, nil
+}
+
+
 func (v *Verifier) fetchAndVerify(anchor *TrustAnchor, requiredSize uint64) ([]byte, uint64, error) {
 	resp, err := v.httpClient.Get(anchor.CheckpointURL)
 	if err != nil {

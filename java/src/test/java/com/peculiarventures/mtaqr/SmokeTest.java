@@ -77,4 +77,23 @@ public class SmokeTest {
     @Test public void ecdsaP256RejectTampered()  throws Exception { rejectTampered("ecdsa-p256", LocalSigner.ecdsaP256(SEED_ECDSA_P256)); }
     @Test public void mlDsa44IssueAndVerify()    throws Exception { roundTrip("ml-dsa-44",   LocalSigner.mlDsa44(SEED_ML_DSA_44)); }
     @Test public void mlDsa44RejectTampered()    throws Exception { rejectTampered("ml-dsa-44", LocalSigner.mlDsa44(SEED_ML_DSA_44)); }
+@Test
+    public void mode0RoundTrip() throws Exception {
+        String origin = "test.mode0.java/v1";
+        var signer = LocalSigner.ed25519(SEED_ED25519);
+        Issuer issuer = Issuer.builder()
+            .origin(origin).schemaId(1).mode(0).witnessCount(1).signer(signer).build();
+        issuer.init().get();
+
+        var qr = issuer.issue(Map.of("subject", "mode0-java-test"), Duration.ofHours(1)).get();
+        TrustConfig trust = TrustConfig.parse(issuer.trustConfigJson("http://localhost:0/checkpoint"));
+        String revArtifact = issuer.revocationArtifact();
+        Verifier v = Verifier.builder()
+            .revocationProvider(url -> CompletableFuture.completedFuture(revArtifact))
+            .build().addAnchor(trust);
+
+        Verifier.VerifyOk ok = v.verify(qr.payload()).get();
+        assertEquals(0, ok.mode(), "result mode must be 0");
+        assertEquals("mode0-java-test", ok.claims().get("subject").toString());
+    }
 }
