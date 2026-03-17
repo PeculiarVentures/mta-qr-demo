@@ -486,6 +486,7 @@ export class Verifier {
       this.revocCache.set(trust.origin, p);
       cached = p;
     }
+    if (!cached) return { revoked: true, reason: "artifact unavailable (fail-closed)" };
 
     // Revoc hash enforcement: reject if the checkpoint committed a revoc hash,
     // the served artifact has the same tree_size as the checkpoint (same point
@@ -508,7 +509,7 @@ export class Verifier {
 
   private parseRevArtifact(
     text: string, trust: TrustConfig
-  ): { cascade: Cascade; treeSize: bigint } | { error: string } {
+  ): { cascade: Cascade; treeSize: bigint; artifactHash: string } | { error: string } {
     const parts = text.split("\n\n");
     if (parts.length < 2) return { error: "missing blank line" };
     const bodyLines = parts[0].split("\n");
