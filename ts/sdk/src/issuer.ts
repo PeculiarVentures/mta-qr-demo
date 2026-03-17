@@ -316,7 +316,7 @@ ${treeSize}
 mta-qr-revocation-v1
 ${cascB64}
 `;
-    const sig     = this.signer.sign(new TextEncoder().encode(body));
+    const sig     = await this.signer.sign(new TextEncoder().encode(body));
     const sigPayload = new Uint8Array(4 + sig.length);
     sigPayload.set(this.issuerKeyId, 0);
     sigPayload.set(sig, 4);
