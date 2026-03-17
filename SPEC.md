@@ -1499,15 +1499,16 @@ checkpoint signature automatically covers the revocation state at that moment.
 Witnesses attest to the revocation state without any change to the witness
 protocol.
 
-The Java issuer does not yet emit the `revoc:` extension line. No verifier
-currently cross-checks the hash in a checkpoint against the artifact it fetches,
-so the commitment is present in signatures but not yet enforced at verification
-time. The remaining steps to complete this are:
+All four issuers (Go, TypeScript, Rust, Java) now emit the `revoc:` extension
+line when a revocation artifact is available. All four verifiers parse the line
+and extract the hash. Active enforcement — rejecting a verification result when
+the hash of the fetched artifact does not match the committed hash — is currently
+advisory in all four verifiers (the hash is extracted and available but not used
+as a hard rejection criterion). The remaining step to complete this is:
 
-1. Java issuer: emit `revoc:<hex>` as checkpoint body line 4
-2. All verifiers: after fetching the revocation artifact, compute
+1. All verifiers: after fetching the revocation artifact, compute
    `SHA-256(artifact_bytes)`, find the `revoc:` line in the checkpoint body,
-   and reject if the hashes do not match
+   and reject if the hashes do not match (currently logged only)
 
 Once step 2 is complete, a verifier that checks both the checkpoint signature
 (covering the revoc hash) and the fetched artifact against that hash has an
@@ -2218,11 +2219,7 @@ signature verification, staleness check, and cascade query — fail-closed
 throughout. The cascade construction follows SPEC.md §Revocation normative
 parameters, not the CRLite wire format. Delta updates are deferred to v2.
 
-**Revocation auditability: deferred to v2.** The current protocol has no
-mechanism for independent verification that the issuer's filter correctly
-reflects all revocations made. A v2 extension would commit a hash of the
-revocation artifact into each checkpoint body, making the revocation state
-tamper-evident and verifiable by witnesses. See §Revocation — Auditability.
+**Revocation auditability: tamper-evident commitment implemented; full auditability deferred.** All four issuers now commit `SHA-256(artifact)` in every checkpoint body as a `revoc:` extension line, making the revocation state tamper-evident. Witnesses automatically cosign this commitment. What remains deferred: hard enforcement in verifiers (currently advisory), and full CRLite-style auditability where independent parties can reconstruct the filter from publicly disclosed revocation events. See §Revocation — Auditability.
 
 ### Non-Blocking — Required Before v1 Finalization
 

@@ -665,7 +665,7 @@ Mode 0 payloads are significantly larger. With ECDSA P-256 and two witness
 cosignatures, a minimal Mode 0 payload is around 700 bytes. With ML-DSA-44,
 Mode 0 is not feasible within QR capacity limits.
 
-Mode 0 is not yet implemented in this reference SDK.
+Mode 0 is fully implemented in all four reference SDKs (Go, TypeScript, Rust, Java). Issuers embed the root hash, issuer signature, and witness cosignatures directly in the payload; verifiers reconstruct the checkpoint body from these fields and verify all signatures without any network access.
 
 ### Payload size implications
 
