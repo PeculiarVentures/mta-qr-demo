@@ -38,7 +38,7 @@ export interface IssuerConfig {
    *       building a scanner that implements tile fetching independently.
    * Defaults to 1.
    */
-  mode?: 1 | 2;
+  mode?: 0 | 1 | 2;
   /**
    * Number of witness cosignatures to include.
    * Defaults to 2.
@@ -92,7 +92,7 @@ export class Issuer {
   private readonly origin:      string;
   private readonly originId:    bigint;
   private readonly schemaId:    number;
-  private readonly mode:        1 | 2;
+  private readonly mode:        0 | 1 | 2;
   private readonly batchSize:   number;
   private readonly signer:      Signer;
   private readonly witnesses:   WitnessKey[];
@@ -111,7 +111,7 @@ export class Issuer {
     this.origin    = config.origin;
     this.originId  = computeOriginId(config.origin);
     this.schemaId  = config.schemaId;
-    this.mode      = config.mode ?? 1;
+    this.mode      = (config.mode ?? 1) as 0 | 1 | 2;
     this.batchSize = config.batchSize ?? 16;
     this.signer    = signer;
 
@@ -248,7 +248,7 @@ export class Issuer {
   // --- private ---
 
   private totalEntries(): number {
-    return this.batches.reduce((n, b) => n + b.entries.length, 0) + this.currentBatch.length;
+    return this.batches.reduce((n: number, b: Batch) => n + b.entries.length, 0) + this.currentBatch.length;
   }
 
   private batchRoots(): Uint8Array[] {

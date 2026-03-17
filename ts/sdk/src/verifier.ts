@@ -405,7 +405,7 @@ export class Verifier {
   /** Verify a Mode 0 embedded checkpoint against the trust config.
    *  Returns the authenticated root hash on success. */
   private verifyEmbeddedCheckpoint(
-    p: DecodedPayload,
+    p: ReturnType<typeof decodePayload>,
     trust: TrustConfig,
   ): { ok: true; rootHash: Uint8Array } | { ok: false; reason: string } {
     if (!p.rootHash || p.rootHash.length !== 32)
