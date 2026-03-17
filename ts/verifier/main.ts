@@ -14,6 +14,7 @@ import {
 import { verifySig as sigVerify, SIG_ALG_ED25519, sigAlgSigLen as sigLen } from "../sdk/src/verify-sig.js";
 import type { SigAlg } from "../sdk/src/signer.js";
 import { decodePayload, MODE_ONLINE } from "../sdk/src/payload.js";
+import { Cascade } from "../sdk/src/cascade.js";
 
 const PORT = parseInt(process.env.MTA_PORT ?? "3002", 10);
 
@@ -23,7 +24,7 @@ interface TrustAnchor {
   origin: string; originID: bigint; issuerPubKey: Uint8Array;
   issuerKeyName: string; // key name prefix as it appears in note sig lines
   sigAlg: number; witnessQuorum: number; witnesses: WitnessEntry[];
-  checkpointURL: string;
+  checkpointURL: string; revocationURL: string;
 }
 
 const anchors = new Map<string, TrustAnchor>(); // keyed by origin_id hex
@@ -32,6 +33,10 @@ const anchors = new Map<string, TrustAnchor>(); // keyed by origin_id hex
 // Bounded to prevent memory exhaustion from payloads with incrementing tree_size.
 const MAX_CACHE_ENTRIES = 1000;
 const checkpointCache = new Map<string, { rootHash: Uint8Array; fetchedAt: number }>();
+
+// Revocation cache: one entry per origin.
+interface CachedRevocation { cascade: Cascade; treeSize: bigint; }
+const revocCache = new Map<string, CachedRevocation>();
 
 // --- Verification ---
 interface Step { name: string; ok: boolean; detail: string; }
@@ -167,13 +172,10 @@ async function verify(payloadBytes: Uint8Array): Promise<VerifyResult> {
   res.expiryTime   = entry.times[1];
   res.schemaId     = entry.schemaId;
 
-  // 10. Revocation check.
-  // The revocation protocol is fully specified in SPEC.md §Revocation:
-  // a Bloom filter cascade over revoked/valid entry indices, signed with
-  // the issuer key, served at GET /revoked.
-  // TODO: implement cascade fetch, cache, staleness check, and query.
-  // Fail-open is NOT the correct default. See issue #14.
-  add("Revocation check", false, "not implemented — stub only, revocation not checked");
+  // 10. Revocation check — SPEC.md §Revocation.
+  const revocResult = await checkRevocation(anchor, p.entryIndex, p.treeSize);
+  if (revocResult.revoked) return fail("Revocation check", revocResult.reason);
+  add("Revocation check", true, revocResult.reason);
 
   // 11. Expiry check (10-minute grace).
   const now = Math.floor(Date.now() / 1000);
@@ -186,6 +188,85 @@ async function verify(payloadBytes: Uint8Array): Promise<VerifyResult> {
   res.claims = entry.claims;
   add("✓ Verification complete", true, `all checks passed · entry_index=${p.entryIndex} · origin="${anchor.origin}"`);
   return res;
+}
+
+const STALE_THRESHOLD = 32n;
+
+async function checkRevocation(
+  anchor: TrustAnchor, entryIndex: bigint, checkpointTreeSize: bigint
+): Promise<{ revoked: boolean; reason: string }> {
+  if (!anchor.revocationURL)
+    return { revoked: false, reason: "skipped — no revocation_url in trust config (fail-open)" };
+
+  let cached = revocCache.get(anchor.origin) ?? null;
+  if (cached && checkpointTreeSize > cached.treeSize &&
+      checkpointTreeSize - cached.treeSize > STALE_THRESHOLD) {
+    cached = null;
+  }
+
+  if (!cached) {
+    let raw: string;
+    try {
+      const resp = await fetch(anchor.revocationURL, { signal: AbortSignal.timeout(10_000) });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      raw = await resp.text();
+      if (raw.length > 64 * 1024) throw new Error("artifact too large");
+    } catch (e) {
+      return { revoked: true, reason: `no revocation artifact (fail-closed): ${e}` };
+    }
+    const parsed = parseRevArtifact(raw, anchor);
+    if ("error" in parsed)
+      return { revoked: true, reason: `invalid artifact (fail-closed): ${parsed.error}` };
+    revocCache.set(anchor.origin, parsed);
+    cached = parsed;
+  }
+
+  if (cached.treeSize <= entryIndex)
+    return { revoked: true,
+      reason: `entry_index=${entryIndex} not covered (artifact tree_size=${cached.treeSize}) — fail-closed` };
+
+  if (cached.cascade.query(entryIndex))
+    return { revoked: true, reason: `entry_index=${entryIndex} is revoked` };
+
+  return { revoked: false,
+    reason: `entry_index=${entryIndex} not revoked (cascade checked, artifact tree_size=${cached.treeSize})` };
+}
+
+function parseRevArtifact(
+  text: string, anchor: TrustAnchor
+): CachedRevocation | { error: string } {
+  const sep = text.indexOf("\n\n");
+  if (sep < 0) return { error: "missing blank line" };
+  const bodyPart = text.slice(0, sep);
+  const sigPart  = text.slice(sep + 2);
+  const body     = bodyPart + "\n";
+  const lines    = bodyPart.split("\n");
+  if (lines.length !== 4) return { error: `expected 4 body lines, got ${lines.length}` };
+  const [origin, treeSizeStr, artifactType, cascB64] = lines;
+  if (origin !== anchor.origin) return { error: `origin mismatch: ${origin}` };
+  if (artifactType !== "mta-qr-revocation-v1") return { error: `unknown type: ${artifactType}` };
+  const treeSize = BigInt(treeSizeStr);
+  if (treeSize === 0n) return { error: "tree_size=0" };
+
+  let cascBytes: Uint8Array;
+  try { cascBytes = Buffer.from(cascB64, "base64"); }
+  catch { return { error: "base64 decode failed" }; }
+
+  let cascade: Cascade;
+  try { cascade = Cascade.decode(cascBytes); }
+  catch (e) { return { error: `cascade decode: ${e}` }; }
+
+  const bodyBytes = Buffer.from(body, "utf8");
+  const prefix = `— ${anchor.issuerKeyName} `;
+  const sigLine = sigPart.split("\n").find(l => l.startsWith(prefix));
+  if (!sigLine) return { error: "issuer signature line not found" };
+  const sigRaw = Buffer.from(sigLine.slice(prefix.length).trim(), "base64");
+  if (sigRaw.length < 4) return { error: "signature too short" };
+  const sig = sigRaw.subarray(4);
+  if (!sigVerify(anchor.sigAlg as SigAlg, bodyBytes, sig, anchor.issuerPubKey))
+    return { error: "signature verification failed" };
+
+  return { cascade, treeSize };
 }
 
 async function fetchAndVerify(anchor: TrustAnchor, requiredSize: bigint): Promise<[Uint8Array, bigint]> {
@@ -348,6 +429,7 @@ const server = createServer(async (req, res) => {
       issuerKeyName: tc.issuer_key_name ?? "",
       sigAlg: tc.sig_alg, witnessQuorum,
       witnesses, checkpointURL: tc.checkpoint_url,
+      revocationURL: tc.revocation_url ?? "",
     };
     // origin_id collision check: per SPEC, two distinct origins MUST NOT share
     // the same 8-byte origin_id — it would make routing ambiguous.
