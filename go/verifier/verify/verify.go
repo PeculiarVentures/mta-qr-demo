@@ -498,6 +498,19 @@ func verifyNote(note string, anchor *TrustAnchor, requiredSize uint64) ([]byte, 
 		return nil, 0, fmt.Errorf("witness quorum not met: %d/%d verified", len(verifiedWitnesses), anchor.WitnessQuorum)
 	}
 
+	// Extract optional revoc: extension line from the checkpoint body.
+	// If present, callers can verify their cached revocation artifact matches.
+	var revocHash []byte
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.HasPrefix(line, "revoc:") {
+			h, err := hex.DecodeString(strings.TrimPrefix(line, "revoc:"))
+			if err == nil && len(h) == 32 {
+				revocHash = h
+			}
+			break
+		}
+	}
+	_ = revocHash // available for callers that implement full revoc auditability
 	return rootHash, treeSize, nil
 }
 

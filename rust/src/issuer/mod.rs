@@ -77,11 +77,14 @@ struct Batch {
 }
 
 struct SignedCheckpoint {
-    tree_size:  u64,
-    root_hash:  Vec<u8>,
-    body:       Vec<u8>,
-    issuer_sig: Vec<u8>,
-    cosigs:     Vec<(Vec<u8>, u64, Vec<u8>)>, // (key_id, timestamp, sig)
+    tree_size:    u64,
+    root_hash:    Vec<u8>,
+    body:         Vec<u8>,     // 4-line if revoc committed, else 3-line
+    plain_body:   Vec<u8>,     // always 3-line; used for Mode 0 embedding
+    issuer_sig:   Vec<u8>,     // sig over body
+    plain_sig:    Vec<u8>,     // sig over plain_body (for Mode 0)
+    cosigs:       Vec<(Vec<u8>, u64, Vec<u8>)>, // cosigs over body
+    plain_cosigs: Vec<(Vec<u8>, u64, Vec<u8>)>, // cosigs over plain_body
 }
 
 struct State {
@@ -279,22 +282,41 @@ impl Issuer {
             (state.origin_id, total_entries(&state), root)
         };
 
-        let body      = checkpoint_body(&self.cfg.origin, tree_size, &parent_root);
+        // Commit revocation state into the checkpoint body so witnesses attest to it.
+        let revoc_snap: Option<String> = {
+            let s = self.state.lock().await;
+            s.latest_rev_artifact.clone()
+        };
+        let body = if let Some(ref art) = revoc_snap {
+            checkpoint_body_with_revoc(&self.cfg.origin, tree_size, &parent_root, art.as_bytes())
+        } else {
+            checkpoint_body(&self.cfg.origin, tree_size, &parent_root)
+        };
         let issuer_sig = self.signer.sign(&body).await?;
-        let ts        = unix_now();
+        // Plain 3-line body sigs — embedded in Mode 0 payloads.
+        let plain_body = checkpoint_body(&self.cfg.origin, tree_size, &parent_root);
+        let plain_sig  = if plain_body == body { issuer_sig.clone() }
+                         else { self.signer.sign(&plain_body).await? };
+        let ts = unix_now();
 
-        let cosigs: Vec<(Vec<u8>, u64, Vec<u8>)> = {
+        let (cosigs, plain_cosigs): (Vec<_>, Vec<_>) = {
             let state = self.state.lock().await;
             state.witnesses.iter().map(|w| {
-                let msg = cosignature_message(&body, ts);
-                let sig = w.signing.sign(&msg).to_bytes().to_vec();
-                (w.key_id.to_vec(), ts, sig)
-            }).collect()
+                use ed25519_dalek::Signer as _;
+                let c = { let msg = cosignature_message(&body, ts);
+                    (w.key_id.to_vec(), ts, w.signing.sign(&msg).to_bytes().to_vec()) };
+                let p = if plain_body == body { c.clone() } else {
+                    let msg = cosignature_message(&plain_body, ts);
+                    (w.key_id.to_vec(), ts, w.signing.sign(&msg).to_bytes().to_vec())
+                };
+                (c, p)
+            }).unzip()
         };
 
         let mut state = self.state.lock().await;
         state.latest_ckpt = Some(SignedCheckpoint {
-            tree_size, root_hash: parent_root, body, issuer_sig, cosigs,
+            tree_size, root_hash: parent_root, body, plain_body,
+            issuer_sig, plain_sig, cosigs, plain_cosigs,
         });
         // Build revocation artifact alongside every checkpoint.
         state.latest_rev_artifact = Some(build_revocation_artifact(
@@ -412,15 +434,11 @@ fn build_payload(
 
         let mut rh = [0u8; 32];
         rh.copy_from_slice(&ckpt.root_hash);
-        let issuer_sig = ckpt.issuer_sig.clone();
-        let cosigs: Vec<(Vec<u8>, u64, Vec<u8>)> = state.witnesses.iter()
-            .map(|w| {
-                let ts  = unix_now();
-                let msg = cosignature_message(&ckpt.body, ts);
-                use ed25519_dalek::Signer as DalekSigner;
-                let sig: ed25519_dalek::Signature = w.signing.sign(&msg);
-                (w.key_id.to_vec(), ts, sig.to_bytes().to_vec())
-            }).collect();
+        // Mode 0 embeds the checkpoint inline. The verifier reconstructs the
+        // checkpoint body as a plain 3-line body from (origin, treeSize, rootHash).
+        // Use pre-computed plain_sig and plain_cosigs from the checkpoint.
+        let issuer_sig = ckpt.plain_sig.clone();
+        let cosigs = ckpt.plain_cosigs.clone();
 
         let mut buf = encode_payload(
             global_idx, ckpt.tree_size, state.origin_id,
@@ -589,6 +607,17 @@ pub(crate) fn hash_node_pub(left: &[u8], right: &[u8]) -> Vec<u8> {
 pub(crate) fn checkpoint_body(origin: &str, tree_size: u64, root_hash: &[u8]) -> Vec<u8> {
     let b64 = B64.encode(root_hash);
     format!("{origin}\n{tree_size}\n{b64}\n").into_bytes()
+}
+
+/// Checkpoint body with a 4th extension line committing to the revocation artifact.
+pub(crate) fn checkpoint_body_with_revoc(
+    origin: &str, tree_size: u64, root_hash: &[u8], revoc_artifact: &[u8]
+) -> Vec<u8> {
+    let mut body = checkpoint_body(origin, tree_size, root_hash);
+    let hash = Sha256::digest(revoc_artifact);
+    let ext = format!("revoc:{}\n", hex::encode(&hash[..]));
+    body.extend_from_slice(ext.as_bytes());
+    body
 }
 
 pub(crate) fn cosignature_message(body: &[u8], timestamp: u64) -> Vec<u8> {

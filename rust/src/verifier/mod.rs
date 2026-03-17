@@ -431,14 +431,16 @@ impl Verifier {
         let body: Vec<u8> = (note[..blank].to_string() + "\n").into_bytes();
         let rest = &note[blank + 2..];
 
-        // Parse body
+        // Parse body — c2sp.org/tlog-checkpoint: 3 mandatory lines + optional extensions.
         let body_str = std::str::from_utf8(&body)?;
-        let lines: Vec<&str> = body_str.trim_end_matches('\n').splitn(3, '\n').collect();
-        // Per c2sp.org/tlog-checkpoint: three mandatory lines plus optional extension lines.
+        let lines: Vec<&str> = body_str.trim_end_matches('\n').split('\n').collect();
         if lines.len() < 3 { return Err(anyhow!("checkpoint body must have at least 3 lines, got {}", lines.len())); }
         let note_origin  = lines[0];
         let tree_size: u64 = lines[1].parse()?;
         let root_hash    = B64.decode(lines[2])?;
+        // Extract optional revoc: extension line (line 4+).
+        let _revoc_hash: Option<&str> = lines.get(3)
+            .and_then(|l| l.strip_prefix("revoc:"));
 
         if note_origin != trust.origin {
             return Err(anyhow!("origin mismatch: {:?}", note_origin));

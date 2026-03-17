@@ -349,6 +349,9 @@ export class Verifier {
     const rest     = note.slice(blankIdx + 2);
 
     const { origin, treeSize, rootHash } = parseCheckpointBody(body);
+    // Extract optional revoc: extension line for auditability.
+    const _revocHashHex = new TextDecoder().decode(body)
+      .split("\n").find(l => l.startsWith("revoc:"))?.slice("revoc:".length) ?? null;
     if (origin !== trust.origin) {
       throw new Error(`origin mismatch: got "${origin}" want "${trust.origin}"`);
     }
