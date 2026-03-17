@@ -2,7 +2,7 @@
 """
 MTA-QR Interop Test Script
 Builds and starts all six services (two issuers per algorithm × two implementations + two verifiers),
-runs the 12-cell positive matrix (3 algorithms × 4 issuer/verifier combinations) plus 3 negative tests, and reports results.
+runs the 12-cell positive matrix (3 algorithms × 4 issuer/verifier combinations), 3 negative tests, and 2 revocation cross-impl tests, and reports results.
 
 Requires: Go 1.22+, Node 20+, tsx installed globally.
 """
@@ -36,6 +36,16 @@ SERVICES = [
     # Dedicated verifiers for negative tests — start completely clean (no MTA_TRUST_CONFIG_URLS)
     {"name": "neg-go-verifier",   "bin": "/tmp/mta-go-verifier", "port": 8089, "env": {}},
     {"name": "neg-ts-verifier",   "bin": "npx", "args": ["tsx", "verifier/main.ts"], "port": 3009,
+     "cwd": TS_DIR, "env": {}},
+    # Dedicated issuers for revocation tests — fresh instances, no prior entries.
+    {"name": "rev-go-issuer",  "bin": "/tmp/mta-go-issuer", "port": 8091, "env": {
+        "MTA_SIG_ALG": "", "MTA_ORIGIN": "demo.mta-qr.example/go-issuer/revoc-test/v1"}},
+    {"name": "rev-ts-issuer",  "bin": "npx", "args": ["tsx", "issuer/main.ts"], "port": 3011,
+     "cwd": TS_DIR, "env": {
+        "MTA_SIG_ALG": "", "MTA_ORIGIN": "demo.mta-qr.example/ts-issuer/revoc-test/v1"}},
+    # Dedicated verifiers for revocation tests — start with empty caches, loaded per-test.
+    {"name": "rev-go-verifier", "bin": "/tmp/mta-go-verifier", "port": 8092, "env": {}},
+    {"name": "rev-ts-verifier", "bin": "npx", "args": ["tsx", "verifier/main.ts"], "port": 3012,
      "cwd": TS_DIR, "env": {}},
 ]
 
@@ -268,7 +278,95 @@ def run_negative_test(label, issuer_port, verifier_port,
 
     results.append(row)
 
-# ---- Main ----
+def run_revocation_test(label, issuer_port, verifier_port):
+    """
+    Issue a QR, revoke it, then verify cold (no pre-revocation cache).
+
+    We deliberately skip the pre-revocation verify to avoid populating the
+    verifier's revocation cache. The verify call happens after revocation,
+    so the verifier fetches the artifact fresh and sees the revoked entry.
+    The verifier's staleness check uses the payload's embedded tree_size —
+    since the cache is cold, it must fetch and will get the updated artifact.
+    """
+    print(f"\n  [{label}]")
+    row = {"label": label, "ok": False, "steps": [], "error": None}
+
+    if not check_alive(issuer_port) or not check_alive(verifier_port):
+        row["error"] = "service not responding"
+        print(f"    {FAIL} service not responding")
+        results.append(row)
+        return
+
+    tc_url = f"http://localhost:{issuer_port}/trust-config"
+    try:
+        tc_resp = post(f"http://localhost:{verifier_port}/load-trust-config", {"url": tc_url})
+        if not tc_resp.get("ok"):
+            row["error"] = f"load-trust-config failed: {tc_resp}"
+            print(f"    {FAIL} load-trust-config: {tc_resp}")
+            results.append(row)
+            return
+        print(f"    {PASS} loaded trust config: {tc_resp.get('origin')}")
+    except Exception as e:
+        row["error"] = f"load-trust-config error: {e}"
+        print(f"    {FAIL} {e}")
+        results.append(row)
+        return
+
+    # Issue a QR.
+    try:
+        issue_resp = post(f"http://localhost:{issuer_port}/issue", {
+            "schema_id": 42, "ttl_seconds": 3600,
+            "claims": {"test": label, "subject": "revocation-interop"}
+        })
+        entry_index = issue_resp["entry_index"]
+        payload_hex = issue_resp["payload_hex"]
+        print(f"    {PASS} issued entry_index={entry_index}")
+    except Exception as e:
+        row["error"] = f"issue error: {e}"
+        print(f"    {FAIL} {e}")
+        results.append(row)
+        return
+
+    # Revoke immediately — do NOT verify first so the verifier cache stays cold.
+    try:
+        revoke_resp = post(f"http://localhost:{issuer_port}/revoke", {"entry_index": entry_index})
+        if not revoke_resp.get("revoked"):
+            row["error"] = f"revoke failed: {revoke_resp}"
+            print(f"    {FAIL} revoke failed: {revoke_resp}")
+            results.append(row)
+            return
+        print(f"    {PASS} revoked entry_index={entry_index} (cache still cold)")
+    except Exception as e:
+        row["error"] = f"revoke error: {e}"
+        print(f"    {FAIL} {e}")
+        results.append(row)
+        return
+
+    # Verify cold — verifier has no cached artifact for this origin yet.
+    # It must fetch GET /revoked, which now reflects the revocation.
+    try:
+        resp = post(f"http://localhost:{verifier_port}/verify", {"payload_hex": payload_hex})
+        valid = resp.get("valid", False)
+        steps = resp.get("steps", [])
+        for step in steps:
+            if "revocation" in step.get("name", "").lower() or not step.get("ok"):
+                icon = PASS if step["ok"] else FAIL
+                print(f"    {icon} {step['name']}: {step['detail'][:80]}")
+        if not valid:
+            print(f"    {PASS} correctly rejected (cold-cache verify sees revoked artifact)")
+            row["ok"] = True
+        else:
+            row["error"] = "verify returned valid=true after revocation — cold-cache fetch did not see revoked entry"
+            print(f"    {FAIL} NOT rejected (bug)")
+        row["steps"] = steps
+    except Exception as e:
+        row["error"] = f"verify error: {e}"
+        print(f"    {FAIL} {e}")
+
+    results.append(row)
+
+
+# ---- Main ----# ---- Main ----
 
 print("MTA-QR Interop Test Matrix")
 print("=" * 60)
@@ -312,6 +410,12 @@ run_negative_test("Reject: tampered payload (bit flip in TBS)",
     issuer_port=8081, verifier_port=8089, expect_valid=False, tamper=True)
 run_negative_test("Reject: no trust config loaded for origin",
     issuer_port=8083, verifier_port=3009, expect_valid=False, skip_tc=True)
+
+print("\n--- Revocation tests (issuer revokes, other verifier rejects) ---")
+run_revocation_test("Revoke: Go issuer → TS verifier rejects",
+    issuer_port=8091, verifier_port=3012)
+run_revocation_test("Revoke: TS issuer → Go verifier rejects",
+    issuer_port=3011, verifier_port=8092)
 
 # ---- Summary ----
 print("\n" + "=" * 60)
