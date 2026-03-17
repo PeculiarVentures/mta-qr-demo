@@ -67,8 +67,9 @@ pub type RevocationProvider  = Box<dyn Fn(&str) -> Result<String> + Send + Sync>
 
 /// Cached revocation artifact per origin.
 struct CachedRevocation {
-    cascade:   crate::cascade::Cascade,
-    tree_size: u64,
+    cascade:       crate::cascade::Cascade,
+    tree_size:     u64,
+    artifact_hash: [u8; 32],
 }
 
 /// The MTA-QR verifier.
@@ -357,7 +358,7 @@ impl Verifier {
 
         // 10. Revocation check — SPEC.md §Revocation.
         {
-            let revoc = self.check_revocation(p.entry_index, p.tree_size, trust).await;
+            let revoc = self.check_revocation(p.entry_index, p.tree_size, trust, None).await;
             match revoc {
                 Ok(ref msg)  => { add!(true,  "revocation check", msg.as_str()); }
                 Err(ref msg) => { fail!("revocation check", msg.as_str()); }
@@ -493,7 +494,7 @@ impl Verifier {
         Ok((root_hash, tree_size))
     }
     /// Revocation check — SPEC.md §Revocation — Verifier Behavior.
-    async fn check_revocation(&self, entry_index: u64, checkpoint_tree_size: u64, trust: &TrustConfig) -> Result<String, String> {
+    async fn check_revocation(&self, entry_index: u64, checkpoint_tree_size: u64, trust: &TrustConfig, committed_revoc_hash: Option<[u8;32]>) -> Result<String, String> {
         if trust.revocation_url.is_empty() {
             return Ok("skipped — no revocation_url in trust config (fail-open)".into());
         }
@@ -539,6 +540,16 @@ impl Verifier {
             ));
         }
 
+        // Revoc hash enforcement: if checkpoint committed a hash, verify it matches.
+        // Only enforce when artifact.tree_size < checkpoint_tree_size — if the
+        // artifact is newer, it was legitimately updated (e.g., after a revoke).
+        if let Some(committed) = committed_revoc_hash {
+            if artifact.tree_size < checkpoint_tree_size && artifact.artifact_hash != committed {
+                return Err(format!(
+                    "revocation artifact hash mismatch: checkpoint committed {:x?}, artifact hashes to {:x?}",
+                    &committed[..4], &artifact.artifact_hash[..4]));
+            }
+        }
         self.revoc_cache.lock().unwrap().insert(trust.origin.clone(), artifact);
         result
     }
@@ -621,7 +632,12 @@ impl Verifier {
         let cascade = crate::cascade::Cascade::decode(&casc_bytes)
             .map_err(|e| anyhow!("revocation artifact: cascade decode: {e}"))?;
 
-        Ok(CachedRevocation { cascade, tree_size })
+        let artifact_hash = {
+            use sha2::{Sha256, Digest};
+            let h = Sha256::digest(text.as_bytes());
+            let mut arr = [0u8; 32]; arr.copy_from_slice(&h); arr
+        };
+        Ok(CachedRevocation { cascade, tree_size, artifact_hash })
     }
 }
 

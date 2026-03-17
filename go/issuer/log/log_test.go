@@ -17,10 +17,14 @@ func newTestLog(t *testing.T) *log.Log {
 	if err != nil {
 		t.Fatalf("Ed25519FromSeed: %v", err)
 	}
-	l, err := log.New("example.com/log-test/v1", signer)
+	// Each test gets a unique origin derived from its name so the
+	// process-wide uniqueness guard does not fire across test functions.
+	origin := "example.com/log-test/" + t.Name() + "/v1"
+	l, err := log.New(origin, signer)
 	if err != nil {
 		t.Fatalf("log.New: %v", err)
 	}
+	t.Cleanup(func() { log.DeregisterOrigin(origin) })
 	return l
 }
 

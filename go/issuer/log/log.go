@@ -88,7 +88,22 @@ type SignedCheckpoint struct {
 }
 
 // New creates a Log with the given origin and issuer Signer.
+// registeredOrigins guards against two Log instances sharing the same origin
+// string within a process. Same origin → same origin_id → ambiguous routing.
+var registeredOrigins sync.Map
+
+// DeregisterOrigin removes an origin from the process-wide registry.
+// Only intended for use in tests — production code should never
+// create two Log instances with the same origin.
+func DeregisterOrigin(origin string) { registeredOrigins.Delete(origin) }
+
 func New(origin string, issuer signing.Signer) (*Log, error) {
+	if origin == "" {
+		return nil, fmt.Errorf("issuer: origin must not be empty")
+	}
+	if _, loaded := registeredOrigins.LoadOrStore(origin, struct{}{}); loaded {
+		return nil, fmt.Errorf("issuer: origin %q is already registered in this process — each origin must be unique", origin)
+	}
 	witnesses := make([]WitnessKey, 2)
 	for i := range witnesses {
 		wpub, wpriv, err := ed25519.GenerateKey(rand.Reader)

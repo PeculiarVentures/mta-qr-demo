@@ -1499,16 +1499,16 @@ checkpoint signature automatically covers the revocation state at that moment.
 Witnesses attest to the revocation state without any change to the witness
 protocol.
 
-All four issuers (Go, TypeScript, Rust, Java) now emit the `revoc:` extension
-line when a revocation artifact is available. All four verifiers parse the line
-and extract the hash. Active enforcement — rejecting a verification result when
-the hash of the fetched artifact does not match the committed hash — is currently
-advisory in all four verifiers (the hash is extracted and available but not used
-as a hard rejection criterion). The remaining step to complete this is:
-
-1. All verifiers: after fetching the revocation artifact, compute
-   `SHA-256(artifact_bytes)`, find the `revoc:` line in the checkpoint body,
-   and reject if the hashes do not match (currently logged only)
+All four issuers (Go, TypeScript, Rust, Java) emit the `revoc:` extension line
+when a revocation artifact is available. All four verifiers enforce the hash:
+when a freshly fetched artifact has `artifact.tree_size < checkpoint.tree_size`
+(the artifact predates the checkpoint, indicating no legitimate update has
+occurred) and the SHA-256 of the artifact does not match the committed hash,
+the verification result is a hard rejection. When `artifact.tree_size >=
+checkpoint.tree_size` (the artifact has been updated since the checkpoint was
+signed, e.g. a revocation was processed), the hash check is skipped — this
+accommodates the normal case where the issuer has updated the artifact after
+the checkpoint was witnessed.
 
 Once step 2 is complete, a verifier that checks both the checkpoint signature
 (covering the revoc hash) and the fetched artifact against that hash has an

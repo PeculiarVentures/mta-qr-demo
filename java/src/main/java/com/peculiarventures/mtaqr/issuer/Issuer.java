@@ -271,12 +271,11 @@ public final class Issuer {
         }
         byte[] parentRoot = merkleRoot(bRoots);
         byte[] plainBody = checkpointBody(origin, treeSize, parentRoot);
-        // Build revocation artifact first; commit its hash in the checkpoint body.
-        String revocSnap;
-        synchronized (lock) { revocSnap = latestRevArtifact; }
-        byte[] body = (revocSnap != null)
+        // Build NEW artifact first so its hash is committed in the checkpoint.
+        String newRevocArt = buildRevocationArtifact(treeSize);
+        byte[] body = (newRevocArt != null)
             ? checkpointBodyWithRevoc(origin, treeSize, parentRoot,
-                revocSnap.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                newRevocArt.getBytes(java.nio.charset.StandardCharsets.UTF_8))
             : plainBody;
         final byte[] finalBody = body, finalPlainBody = plainBody;
 
@@ -304,7 +303,7 @@ public final class Issuer {
                 latestCkpt = new SignedCheckpoint(
                     treeSize, parentRoot, finalBody, issuerSig, cosigs,
                     finalPlainBody, plainSig, plainCosigs);
-                latestRevArtifact = buildRevocationArtifact(treeSize);
+                latestRevArtifact = newRevocArt;
             }
         }));
     }

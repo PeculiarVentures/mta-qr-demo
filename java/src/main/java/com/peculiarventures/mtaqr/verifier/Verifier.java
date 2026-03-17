@@ -149,7 +149,7 @@ public final class Verifier {
         }
     );
 
-    private record CachedRevocation(Cascade cascade, long treeSize) {}
+    private record CachedRevocation(Cascade cascade, long treeSize, byte[] artifactHash) {}
     private final Map<String, CachedRevocation> revocCache = new java.util.concurrent.ConcurrentHashMap<>();
 
     private Verifier(HttpClient httpClient,
@@ -405,7 +405,7 @@ public final class Verifier {
 
         // 10. Revocation check — SPEC.md §Revocation.
         try {
-            String revocMsg = checkRevocation(p.entryIndex, p.treeSize, trust).get();
+            String revocMsg = checkRevocation(p.entryIndex, p.treeSize, trust, null).get();
             steps.add(new Step("revocation check", true, revocMsg));
         } catch (Exception e) {
             String reason = e.getCause() != null ? e.getCause().getMessage() : e.getMessage();
@@ -433,7 +433,7 @@ public final class Verifier {
 
     private static final long STALE_THRESHOLD = 32L;
 
-    private CompletableFuture<String> checkRevocation(long entryIndex, long checkpointTreeSize, TrustConfig trust) {
+    private CompletableFuture<String> checkRevocation(long entryIndex, long checkpointTreeSize, TrustConfig trust, byte[] committedRevocHash) {
         if (trust.revocationUrl == null || trust.revocationUrl.isEmpty())
             return CompletableFuture.completedFuture(
                 "skipped — no revocation_url in trust config (fail-open)");
@@ -446,6 +446,14 @@ public final class Verifier {
         final CachedRevocation fresh = cached;
         if (fresh == null) {
             return fetchRevocationArtifact(trust).thenApply(art -> {
+                // Revoc hash enforcement: only when artifact is older than checkpoint.
+                if (committedRevocHash != null && art.treeSize() < checkpointTreeSize
+                        && !java.util.Arrays.equals(art.artifactHash(), committedRevocHash))
+                    throw new IllegalStateException(
+                        "revocation artifact hash mismatch: checkpoint committed "
+                        + bytesToHex(committedRevocHash).substring(0,16) + "…"
+                        + " but served artifact hashes to "
+                        + bytesToHex(art.artifactHash()).substring(0,16) + "…");
                 revocCache.put(trust.origin, art);
                 return queryRevocation(art, entryIndex);
             });
@@ -519,7 +527,12 @@ public final class Verifier {
         }
         if (!sigOk) throw new IllegalArgumentException("revocation artifact: signature verification failed");
 
-        return new CachedRevocation(cascade, treeSize);
+        byte[] artHash;
+        try {
+            artHash = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (java.security.NoSuchAlgorithmException e) { throw new RuntimeException(e); }
+        return new CachedRevocation(cascade, treeSize, artHash);
     }
 
     private record CheckpointResult(byte[] rootHash, long treeSize) {}

@@ -20,6 +20,26 @@ use sha2::{Sha256, Digest};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+// Process-wide origin registry.
+static REGISTERED_ORIGINS: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+    std::sync::Mutex::new(None);
+
+fn register_origin(origin: &str) -> anyhow::Result<()> {
+    let mut guard = REGISTERED_ORIGINS.lock().unwrap();
+    let set = guard.get_or_insert_with(std::collections::HashSet::new);
+    if !set.insert(origin.to_string()) {
+        return Err(anyhow!("Issuer: origin {:?} is already registered in this process", origin));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn deregister_origin(origin: &str) {
+    if let Ok(mut g) = REGISTERED_ORIGINS.lock() {
+        if let Some(s) = g.as_mut() { s.remove(origin); }
+    }
+}
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Configuration for an Issuer.
@@ -108,6 +128,8 @@ pub struct Issuer {
 
 impl Issuer {
     pub fn new(cfg: IssuerConfig, signer: impl Signer + 'static) -> Self {
+        if cfg.origin.is_empty() { panic!("Issuer: origin must not be empty"); }
+        register_origin(&cfg.origin).expect("Issuer origin uniqueness violated");
         let batch_size = cfg.batch_size.unwrap_or(16);
         Self {
             cfg,
