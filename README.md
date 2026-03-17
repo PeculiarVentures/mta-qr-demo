@@ -4,7 +4,7 @@
 
 Reference implementation of **MTA-QR** — Merkle Tree Assertions for Verifiable QR Codes.
 
-MTA-QR issues cryptographically authenticated QR codes backed by a transparency log. Each QR code is a log entry with a Merkle inclusion proof tying it to a signed, witnessed checkpoint. Verification is offline after a one-time prefetch (Mode 1), or fully embedded in the payload for deployments where no checkpoint fetch is possible (Mode 0), or deferred to a tile server for high-throughput fixed-infrastructure scanning (Mode 2). All three modes are implemented. The protocol is algorithm-agnostic and PQC-ready.
+MTA-QR issues cryptographically authenticated QR codes backed by a transparency log. Each QR code is a log entry with a Merkle inclusion proof tying it to a signed, witnessed checkpoint. Verification is offline after a one-time prefetch (Mode 1), or fully embedded in the payload for deployments where no checkpoint fetch is possible (Mode 0), or deferred to a tile server for high-throughput fixed-infrastructure scanning (Mode 2). Modes 0 and 1 are fully verified in the reference SDKs. Mode 2 issuance is implemented but the reference verifier does not complete Merkle inclusion verification — see Known Limitations. The protocol is algorithm-agnostic and PQC-ready.
 
 This repository provides four independent implementations (Go, TypeScript, Rust, Java) that pass a shared interop matrix across three signing algorithms and two payload modes.
 
@@ -100,7 +100,7 @@ Each verifier asserts the `mode` field on the result matches the issued payload 
 
 ### Payload modes
 
-MTA-QR has three payload modes defined in the protocol, all implemented across all four SDKs.
+MTA-QR has three payload modes. Modes 0 and 1 are fully implemented across all four SDKs. Mode 2 issuance is implemented; verification validates the checkpoint, witnesses, TBS, revocation, and expiry, but the reference verifier does not fetch or verify the Merkle inclusion proof — use Mode 1 when full cryptographic inclusion proof is required.
 
 **Mode 0 — embedded (no checkpoint fetch).** The payload includes the inclusion proof and a compact cosigned checkpoint (root hash + issuer signature + witness cosignatures). No network access at scan time — the checkpoint is verified from the embedded signatures rather than fetched. A trust configuration (issuer and witness public keys) must still be pre-loaded; Mode 0 eliminates the checkpoint fetch, not the trust distribution step. Implemented in all four SDKs.
 
@@ -231,6 +231,8 @@ These are genuine gaps that should be addressed before production use. They are 
 **Mode 2 tile fetching not implemented.** The SDK verifier validates the checkpoint, witnesses, TBS, revocation, and expiry for Mode 2 payloads but does not fetch or verify the Merkle inclusion proof. A production Mode 2 scanner must also fetch inner and outer tiles (see SPEC.md §Verification Flow (Mode 2) for the tile API), verify the two-phase proof, and only then treat the entry as fully verified. The tile server reference implementation does not yet exist.
 
 **Revocation delay.** When an entry is revoked, the revocation is effective only once a new checkpoint has been issued and the verifier's cached artifact becomes stale (STALE_THRESHOLD=32 entries). Between revocation and cache expiry, a revoked credential may still pass verification. This is an inherent trade-off in transparency log models — the window is bounded by checkpoint frequency and STALE_THRESHOLD, not unbounded. Deployments with strict revocation requirements should set short checkpoint intervals and tune STALE_THRESHOLD accordingly.
+
+**Revocation auditability not yet implemented.** In v1 the issuer is the sole authority for both the log and the revocation state. There is no independently verifiable record that the Bloom filter cascade correctly reflects all revocations the issuer has made — this differs from CRLite, where the CA-signed CRLs used to construct the filter are publicly auditable by third parties. A future extension (noted in SPEC.md §Revocation — Auditability) would commit a hash of the current revocation artifact into each checkpoint body, making the revocation state tamper-evident and verifiable by witnesses. Until then, relying parties that require independently auditable revocation should note this limitation.
 
 **Revocation is implemented** in all four language SDKs (Go, TypeScript, Rust, Java). Issuers serve a signed Bloom filter cascade at `GET /revoked` and accept `POST /revoke` for demo purposes. Verifiers fetch the artifact on cache miss, verify the issuer signature with algorithm binding, apply a staleness check (STALE_THRESHOLD=32 entries), and query the cascade fail-closed. The cascade algorithm is cross-verified against locked test vector bytes in all four languages. See SPEC.md §Revocation for the normative wire format and construction parameters.
 
