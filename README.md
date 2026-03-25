@@ -194,7 +194,7 @@ The `VerifyOk`/`VerifyResult` returned by `verify()` includes a `mode` field so 
 
 ## Comparison with other approaches
 
-Four QR authentication approaches have seen real deployment at scale: HMAC (shared-secret MAC), per-assertion signatures (EU Digital COVID Certificate model), rotating barcodes (Ticketmaster SafeTix model), and MTA-QR. The approaches differ on PQC migration path, offline capability, credential lifetime, revocation, and whether verifier independence is architecturally supported.
+Four QR authentication approaches have seen real deployment at scale: HMAC (shared-secret MAC), per-assertion signatures (EU Digital COVID Certificate model), and rotating barcodes (Ticketmaster SafeTix model). MTA-QR is a proposed alternative to all of these approaches . The approaches differ on PQC migration path, offline capability, credential lifetime, revocation, and whether verifier independence is architecturally supported.
 
 The full analysis is in [`COMPARISON.md`](COMPARISON.md), including a property matrix and guidance on which approach fits which deployment context.
 
